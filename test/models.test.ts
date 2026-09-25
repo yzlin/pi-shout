@@ -117,7 +117,7 @@ function fakeHub(options: {
 
 async function withCacheDirectory(run: () => Promise<void>): Promise<void> {
   const previous = process.env.HF_HUB_CACHE;
-  const cacheDirectory = await mkdtemp(join(tmpdir(), "pi-voice-models-"));
+  const cacheDirectory = await mkdtemp(join(tmpdir(), "pi-shout-models-"));
   process.env.HF_HUB_CACHE = cacheDirectory;
   try {
     await run();

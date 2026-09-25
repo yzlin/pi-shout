@@ -26,10 +26,11 @@ import {
   type TranscribeSettings,
   type TranscriptionLanguage,
 } from "./settings.js";
+import type { TranslationSettings } from "./translation-settings.js";
 
 function requireTui(ctx: ExtensionContext): boolean {
   if (ctx.mode === "tui") return true;
-  ctx.ui.notify("Pi Voice configuration requires the interactive TUI", "error");
+  ctx.ui.notify("Pi Shout configuration requires the interactive TUI", "error");
   return false;
 }
 
@@ -57,6 +58,7 @@ type ModelSelectionOptions = {
   microphone?: MicrophoneSetting;
   voiceActivityDetection?: boolean;
   longformChunking?: boolean;
+  translation?: TranslationSettings;
   /** Persists language changes made before this flow activates a model. */
   onPreferredLanguagesChange?: (languages: string[]) => Promise<void>;
   postActivation?: CatalogModelPostActivation;
@@ -83,6 +85,7 @@ export async function runModelSelection(
       microphone: configured?.microphone ?? options.microphone ?? DEFAULT_MICROPHONE,
       voiceActivityDetection: configured?.voiceActivityDetection ?? options.voiceActivityDetection,
       longformChunking: configured?.longformChunking ?? options.longformChunking,
+      translation: configured?.translation ?? options.translation,
     }),
     (settings) => {
       configured = settings;
@@ -135,13 +138,26 @@ export async function runModelSelection(
   }
 }
 
-async function chooseOnboardingShortcut(
+export async function chooseOnboardingShortcut(
   ctx: ExtensionContext,
   current: string,
+  forbiddenShortcut?: string,
 ): Promise<string | undefined> {
   return ctx.ui.custom<string | undefined>((tui, theme, keybindings, done) =>
-    createShortcutPicker(tui, theme, keybindings, current, done),
+    createShortcutPicker(tui, theme, keybindings, current, done, { forbiddenShortcut }),
   );
+}
+
+export function onboardingShortcutUpdate(
+  configured: TranscribeSettings,
+  shortcut: string | undefined,
+): TranscribeSettings | undefined {
+  if (
+    !shortcut ||
+    shortcut === configured.shortcut ||
+    shortcut === configured.translation.shortcut
+  ) return undefined;
+  return { ...configured, shortcut };
 }
 
 async function saveOnboardingSettings(
@@ -174,10 +190,13 @@ async function finishOnboarding(
       continue;
     }
     if (result?.action === "shortcut") {
-      const shortcut = await chooseOnboardingShortcut(ctx, configured.shortcut);
-      if (!shortcut || shortcut === configured.shortcut) continue;
-      const updated = { ...configured, shortcut };
-      if (await saveOnboardingSettings(ctx, updated)) configured = updated;
+      const shortcut = await chooseOnboardingShortcut(
+        ctx,
+        configured.shortcut,
+        configured.translation.shortcut,
+      );
+      const updated = onboardingShortcutUpdate(configured, shortcut);
+      if (updated && await saveOnboardingSettings(ctx, updated)) configured = updated;
       continue;
     }
     if (result?.action === "microphone") {
@@ -213,6 +232,7 @@ export async function changeOnboardingModel(
       chineseOutput: current.chineseOutput,
       voiceActivityDetection: current.voiceActivityDetection,
       longformChunking: current.longformChunking,
+      translation: chosen?.translation ?? current.translation,
     }),
     (settings) => {
       chosen = settings;
@@ -263,8 +283,10 @@ export async function changeOnboardingModel(
 export async function runOnboarding(
   ctx: ExtensionContext,
   shortcut: string,
+  translation?: TranslationSettings,
 ): Promise<TranscribeSettings | undefined> {
   if (!requireTui(ctx)) return undefined;
+  ctx.ui.notify("Pi Shout: speech recognition is local. Translation sends transcript text (never audio) to your selected model provider; provider latency, billing and retention apply. Translation does not include chat/workspace context. Set a target in /voice-settings after setup; file tool results enter chat history and truncated originals may use temporary files.", "info");
 
   let languages = defaultSpokenLanguages();
   // Navigation cannot undo a completed settings commit. Keep it across a
@@ -281,7 +303,7 @@ export async function runOnboarding(
     // the real wait on this machine.
     const picks = recommendModels(CATALOG_MODELS, languages);
     const { activate, waitForCommits } = createSettingsActivation(
-      () => ({ shortcut, preferredLanguages: languages }),
+      () => ({ shortcut: configured?.shortcut ?? shortcut, preferredLanguages: languages, translation: configured?.translation ?? translation }),
       (settings) => {
         configured = settings;
       },

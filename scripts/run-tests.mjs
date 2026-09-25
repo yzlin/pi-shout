@@ -16,7 +16,7 @@ function run(command, args) {
   });
 }
 
-const outputDirectory = await mkdtemp(join(process.cwd(), ".pi-voice-test-"));
+const outputDirectory = await mkdtemp(join(process.cwd(), ".pi-shout-test-"));
 try {
   await run(process.execPath, [
     join(process.cwd(), "node_modules", "typescript", "bin", "tsc"),

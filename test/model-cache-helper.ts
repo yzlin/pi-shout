@@ -8,7 +8,7 @@ import type { CatalogModel } from "../src/catalog.js";
 /** Small, isolated cache entries; never touch real models or download files. */
 export function isolatedModelCache(t: TestContext): (model: CatalogModel) => CatalogModel {
   const previous = process.env.HF_HUB_CACHE;
-  const directory = mkdtempSync(join(tmpdir(), "pi-voice-cache-test-"));
+  const directory = mkdtempSync(join(tmpdir(), "pi-shout-cache-test-"));
   process.env.HF_HUB_CACHE = directory;
   t.after(() => {
     if (previous === undefined) delete process.env.HF_HUB_CACHE;

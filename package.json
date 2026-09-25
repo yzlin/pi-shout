@@ -1,16 +1,16 @@
 {
-  "name": "@earendil-works/pi-voice",
-  "version": "0.2.0",
+  "name": "pi-shout",
+  "version": "0.1.0",
   "description": "Local speech-to-text for Pi",
   "type": "module",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/earendil-works/pi-voice.git"
+    "url": "git+https://github.com/yzlin/pi-shout.git"
   },
-  "homepage": "https://github.com/earendil-works/pi-voice#readme",
+  "homepage": "https://github.com/yzlin/pi-shout#readme",
   "bugs": {
-    "url": "https://github.com/earendil-works/pi-voice/issues"
+    "url": "https://github.com/yzlin/pi-shout/issues"
   },
   "files": [
     "src",
@@ -22,9 +22,6 @@
     "README.md",
     "LICENSE"
   ],
-  "publishConfig": {
-    "access": "public"
-  },
   "keywords": [
     "pi-package",
     "pi-extension",
@@ -50,11 +47,13 @@
     ]
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "*",
-    "@earendil-works/pi-tui": "*",
+    "@earendil-works/pi-ai": ">=0.87.1",
+    "@earendil-works/pi-coding-agent": ">=0.87.1",
+    "@earendil-works/pi-tui": ">=0.87.1",
     "typebox": "*"
   },
   "devDependencies": {
+    "@earendil-works/pi-ai": "1.4.0",
     "@earendil-works/pi-coding-agent": "1.4.0",
     "@earendil-works/pi-tui": "^1.4.0",
     "@huggingface/gguf": "^0.4.6",
