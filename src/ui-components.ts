@@ -388,7 +388,9 @@ export class SingleSelectPicker<T extends string> extends Container implements F
   }
 
   handleInput(data: string): void {
-    if (this.keys.matches(data, "tui.select.up")) {
+    // Vi keys only where typing cannot mean search.
+    const vi = !this.options.searchable;
+    if (this.keys.matches(data, "tui.select.up") || (vi && this.keys.matches(data, "voice.select.up"))) {
       if (this.filtered.length > 0) {
         this.selectedIndex =
           this.selectedIndex === 0 ? this.filtered.length - 1 : this.selectedIndex - 1;
@@ -396,7 +398,7 @@ export class SingleSelectPicker<T extends string> extends Container implements F
       }
       return;
     }
-    if (this.keys.matches(data, "tui.select.down")) {
+    if (this.keys.matches(data, "tui.select.down") || (vi && this.keys.matches(data, "voice.select.down"))) {
       if (this.filtered.length > 0) {
         this.selectedIndex =
           this.selectedIndex === this.filtered.length - 1 ? 0 : this.selectedIndex + 1;

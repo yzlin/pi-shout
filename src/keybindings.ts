@@ -26,6 +26,8 @@ export const VOICE_KEYBINDINGS = {
   "voice.recommendations.browseAll": { defaultKeys: "o", description: "Browse all models" },
   "voice.models.ratingsHelp": { defaultKeys: "?", description: "Open the rating guide" },
   "voice.ratingsHelp.close": { defaultKeys: "q", description: "Close the rating guide" },
+  "voice.select.up": { defaultKeys: "k", description: "Move up in lists without search" },
+  "voice.select.down": { defaultKeys: "j", description: "Move down in lists without search" },
   "voice.scroll.top": { defaultKeys: "home", description: "Scroll to the top" },
   "voice.scroll.bottom": { defaultKeys: "end", description: "Scroll to the bottom" },
   "voice.tryIt.shortcut": { defaultKeys: "s", description: "Change the dictation shortcut" },
