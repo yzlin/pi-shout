@@ -6,11 +6,14 @@ import type {
 import { getKeybindings } from "@earendil-works/pi-tui";
 import { existsSync } from "node:fs";
 import { logStep, watchEventLoop } from "./log.js";
-import { DictationController } from "./dictation-controller.js";
+import { DictationController, type DictationCapture } from "./dictation-controller.js";
+import { DictationDestination, safeEditorText } from "./dictation-output.js";
 import { VoiceKeys } from "./keybindings.js";
-import type { TranscribeSettings } from "./settings.js";
+import type { MicrophoneSetting, TranscribeSettings } from "./settings.js";
 import { displayShortcut } from "./shortcut-core.js";
 import { TranscriptionService } from "./transcription-service.js";
+import { TranslationService } from "./translation-service.js";
+import type { TranslationSettings } from "./translation-settings.js";
 import type { RecordingMeter } from "./visualizer.js";
 
 type ActiveRecording = {
@@ -18,7 +21,11 @@ type ActiveRecording = {
   meter: RecordingMeter;
   /** Ends the event-loop watch held for the whole recording. */
   unwatch: () => void;
+  mode: "original" | "translated";
+  translation: TranslationSettings;
+  model: ExtensionContext['model'];
 };
+type Pending = { original: string; session: string; translated?: string };
 
 const COMPLETION_WIDGET_MS = 5_000;
 /** Setup confirmation stays long enough to read the shortcut and follow-up command. */
@@ -26,8 +33,11 @@ const READY_WIDGET_MS = 20_000;
 
 export type PiVoiceRuntime = {
   readonly service: TranscriptionService;
+  readonly translationService: TranslationService;
   requireConfiguredSettingsForTool(): Promise<TranscribeSettings>;
-  toggleCapture(ctx: ExtensionContext): Promise<void>;
+  toggleCapture(ctx: ExtensionContext, mode?: "original" | "translated"): Promise<void>;
+  recover(ctx: ExtensionCommandContext): Promise<void>;
+  invalidate(): void;
   showSettings(ctx: ExtensionCommandContext): Promise<void>;
   replayOnboarding(ctx: ExtensionCommandContext): Promise<void>;
   shutdown(ctx: ExtensionContext): Promise<void>;
@@ -51,26 +61,67 @@ function transcriptionErrorMessage(error: unknown): string {
   return `Local transcription failed: ${message}`;
 }
 
+type RuntimeAudio = {
+  createMicrophoneCapture(microphone: MicrophoneSetting): DictationCapture;
+  testMicrophonePermission(): Promise<
+    { status: 'granted' } |
+    { status: 'denied' | 'not-determined' | 'error'; message: string }
+  >;
+};
+
+type RuntimeDependencies = {
+  transcriptionService?: TranscriptionService;
+  loadAudio?: () => Promise<RuntimeAudio>;
+};
+
 export function createPiVoiceRuntime(
   pi: ExtensionAPI,
   registeredShortcut: string,
+  registeredTranslationShortcut = 'ctrl+alt+t',
+  dependencies: RuntimeDependencies = {},
 ): PiVoiceRuntime {
   let recording: ActiveRecording | undefined;
   let operation: Promise<void> | undefined;
   let dictation: DictationController | undefined;
+  // Own native teardown independently of the foreground operation. Never wait
+  // for operation here: an operation may itself be waiting for this release.
+  let captureCleanup: Promise<void> = Promise.resolve();
   let shuttingDown = false;
   let stopListening: (() => void) | undefined;
   let completionWidgetTimer: ReturnType<typeof setTimeout> | undefined;
+  let clearOwnedStatusWidget: (() => void) | undefined;
   let settings: TranscribeSettings | undefined;
   let settingsLoaded = false;
   let settingsReadWarning: string | undefined;
   let settingsWarningShown = false;
   let audioModulePromise: Promise<typeof import("./audio.js")> | undefined;
   let visualizerModulePromise: Promise<typeof import("./visualizer.js")> | undefined;
-  const transcriptionService = new TranscriptionService();
+  const transcriptionService = dependencies.transcriptionService ?? new TranscriptionService();
+  const translationService = new TranslationService();
+  let pending: Pending | undefined;
+  let translationAbort: AbortController | undefined;
+  let generation = 0;
 
-  function loadAudio(): Promise<typeof import("./audio.js")> {
-    return (audioModulePromise ??= import("./audio.js"));
+  function invalidate(): void {
+    generation++;
+    translationAbort?.abort();
+    pending = undefined;
+    cancelCompletionWidgetTimer();
+    recording?.meter.stop({ clearWidget: false });
+    recording?.unwatch();
+    recording = undefined;
+    clearRuntimeStatusWidget();
+    clearCancelListener();
+    const oldController = dictation;
+    dictation = undefined;
+    if (oldController) {
+      captureCleanup = Promise.all([captureCleanup, oldController.dispose()]).then(() => undefined);
+    }
+  }
+
+  function loadAudio(): Promise<RuntimeAudio> {
+    if (dependencies.loadAudio) return dependencies.loadAudio();
+    return (audioModulePromise ??= import('./audio.js'));
   }
 
   function loadVisualizer(): Promise<typeof import("./visualizer.js")> {
@@ -94,7 +145,7 @@ export function createPiVoiceRuntime(
   async function notifyReady(ctx: ExtensionContext, configured: TranscribeSettings): Promise<void> {
     // Pi binds shortcuts at extension load. The command path reloads on its
     // own; the shortcut path cannot, so say what it takes to use a new one.
-    const reloadNeeded = configured.shortcut !== registeredShortcut;
+    const reloadNeeded = configured.shortcut !== registeredShortcut || configured.translation.shortcut !== registeredTranslationShortcut;
     const talk = reloadNeeded
       ? `run /reload, then ${displayShortcut(configured.shortcut)} to talk`
       : `${displayShortcut(configured.shortcut)} to talk`;
@@ -110,6 +161,7 @@ export function createPiVoiceRuntime(
       return;
     }
     const { clearTranscribeWidget, showReadyStatus } = await loadVisualizer();
+    ownRuntimeStatusWidget(ctx, clearTranscribeWidget);
     showReadyStatus(ctx, {
       talk,
       help: { command, description: commandDescription },
@@ -147,6 +199,7 @@ export function createPiVoiceRuntime(
       chineseOutput: previous.chineseOutput,
       currentModelId: previous.model.id,
       microphone: previous.microphone,
+      translation: previous.translation,
       postActivation: "advance",
     });
     if (configured) rememberSettings(configured);
@@ -191,7 +244,7 @@ export function createPiVoiceRuntime(
     }
     if (!settings) {
       throw new Error(
-        "Pi Voice is not configured. Ask the user to run /voice-settings in Pi's interactive TUI once to choose and download a local model, then retry transcribe_file.",
+        "Pi Shout is not configured. Ask the user to run /voice-settings in Pi's interactive TUI once to choose and download a local model, then retry transcribe_file.",
       );
     }
     if (!existsSync(settings.model.path)) {
@@ -209,6 +262,11 @@ export function createPiVoiceRuntime(
     const keys = new VoiceKeys(getKeybindings());
     stopListening = ctx.ui.onTerminalInput((data) => {
       if (!keys.matches(data, "voice.dictation.cancel")) return;
+      if (translationAbort) {
+        translationAbort.abort();
+        ctx.ui.notify('Translation cancelled. Original retained; run /voice-recover.', 'warning');
+        return { consume: true };
+      }
       if (recording) {
         void runExclusive(ctx, () => cancelRecording(ctx));
         return { consume: true };
@@ -232,11 +290,35 @@ export function createPiVoiceRuntime(
     completionWidgetTimer = undefined;
   }
 
+  function ownRuntimeStatusWidget(
+    ctx: ExtensionContext,
+    clearTranscribeWidget: (ctx: ExtensionContext) => void,
+  ): () => void {
+    const cleanup = () => clearTranscribeWidget(ctx);
+    clearOwnedStatusWidget = cleanup;
+    return cleanup;
+  }
+
+  function clearRuntimeStatusWidget(expected?: () => void): void {
+    if (expected && clearOwnedStatusWidget !== expected) return;
+    const cleanup = clearOwnedStatusWidget;
+    clearOwnedStatusWidget = undefined;
+    cleanup?.();
+  }
+
+  function clearRuntimeStatusWidgetWith(
+    ctx: ExtensionContext,
+    clearTranscribeWidget: (ctx: ExtensionContext) => void,
+  ): void {
+    if (clearOwnedStatusWidget) clearRuntimeStatusWidget();
+    else clearTranscribeWidget(ctx);
+  }
+
   async function dismissCompletionWidget(ctx: ExtensionContext): Promise<void> {
     if (!completionWidgetTimer) return;
     cancelCompletionWidgetTimer();
     const { clearTranscribeWidget } = await loadVisualizer();
-    clearTranscribeWidget(ctx);
+    clearRuntimeStatusWidgetWith(ctx, clearTranscribeWidget);
   }
 
   function holdCompletionWidget(
@@ -245,10 +327,11 @@ export function createPiVoiceRuntime(
     durationMs = COMPLETION_WIDGET_MS,
   ): void {
     cancelCompletionWidgetTimer();
+    const cleanup = ownRuntimeStatusWidget(ctx, clearTranscribeWidget);
     const timer = setTimeout(() => {
       if (completionWidgetTimer !== timer) return;
       completionWidgetTimer = undefined;
-      clearTranscribeWidget(ctx);
+      clearRuntimeStatusWidget(cleanup);
     }, durationMs);
     completionWidgetTimer = timer;
   }
@@ -256,13 +339,15 @@ export function createPiVoiceRuntime(
   async function cancelRecording(ctx: ExtensionContext): Promise<void> {
     const active = recording;
     if (!active) return;
+    const currentGeneration = generation;
     recording = undefined;
     active.meter.stop();
     active.unwatch();
+    clearOwnedStatusWidget = undefined;
     await active.dictation.dispose();
     if (dictation === active.dictation) dictation = undefined;
     clearCancelListener();
-    if (!shuttingDown) ctx.ui.notify("Recording discarded", "info");
+    if (!shuttingDown && generation === currentGeneration) ctx.ui.notify("Recording discarded", "info");
   }
 
   async function reportDictationError(ctx: ExtensionContext, controller: DictationController): Promise<void> {
@@ -273,55 +358,90 @@ export function createPiVoiceRuntime(
   }
 
   async function stopAndTranscribe(ctx: ExtensionContext): Promise<void> {
+    const active = recording!;
+    let destination: DictationDestination | undefined;
+    try { destination = new DictationDestination(ctx); } catch { /* Missing editor observations fail closed. */ }
+    const currentGeneration = generation;
+    recording = undefined;
+    active.meter.stop({ clearWidget: false });
     const {
       clearTranscribeWidget,
       formatTranscriptionSummary,
       showTranscribeStatus,
     } = await loadVisualizer();
-    const active = recording!;
-    recording = undefined;
-    active.meter.stop({ clearWidget: false });
     const cancelKeys = new VoiceKeys(getKeybindings()).keyText("voice.dictation.cancel");
-    showTranscribeStatus(ctx, "Transcribing…", { cancelKeys });
     let keepCompletionVisible = false;
     try {
+      if (shuttingDown || generation !== currentGeneration) return;
+      ownRuntimeStatusWidget(ctx, clearTranscribeWidget);
+      showTranscribeStatus(ctx, "Transcribing…", { cancelKeys });
       const result = await active.dictation.stop();
-      if (shuttingDown) return;
+      if (shuttingDown || generation !== currentGeneration) return;
       if (!result) {
         await reportDictationError(ctx, active.dictation);
       } else if (result.text) {
-        ctx.ui.pasteToEditor(result.text);
-        showTranscribeStatus(
-          ctx,
-          formatTranscriptionSummary(result.speechSeconds, result.transcribeSeconds),
-        );
-        keepCompletionVisible = true;
+        pending = { original: result.text, session: ctx.sessionManager.getSessionId() };
+        if (active.mode === 'translated') {
+          const abort = new AbortController();
+          translationAbort = abort;
+          showTranscribeStatus(ctx, 'Translating or waiting…', { cancelKeys });
+          try {
+            const translated = await translationService.translate({ text: result.text,
+              targetLanguage: active.translation.targetLanguage!, settings: active.translation,
+              context: { model: active.model, modelRegistry: ctx.modelRegistry },
+              priority: 'dictation', signal: abort.signal });
+            if (shuttingDown || generation !== currentGeneration || abort.signal.aborted) return;
+            pending.translated = translated.text;
+          } catch (error) {
+            if (!shuttingDown && generation === currentGeneration)
+              ctx.ui.notify(`Translation failed: ${error instanceof Error ? error.message : 'Request failed'}. Original retained; run /voice-recover.`, 'warning');
+          } finally { if (translationAbort === abort) translationAbort = undefined; }
+        }
+        if (shuttingDown || generation !== currentGeneration) return;
+        const text = active.mode === 'original' ? pending.original : pending.translated;
+        if (text && safeEditorText(text) && destination?.unchanged()) {
+          ctx.ui.pasteToEditor(text);
+          pending = undefined;
+          showTranscribeStatus(ctx, formatTranscriptionSummary(result.speechSeconds, result.transcribeSeconds));
+          keepCompletionVisible = true;
+        } else if (pending) {
+          ctx.ui.notify('Result held for recovery. Run /voice-recover to insert or discard.', 'warning');
+          showTranscribeStatus(ctx, 'Recovery · /voice-recover');
+        }
       } else {
         ctx.ui.notify(`No speech detected in ${result.speechSeconds.toFixed(1)}s of audio`, "warning");
       }
     } finally {
       active.unwatch();
+      destination?.dispose();
       await active.dictation.dispose();
       if (dictation === active.dictation) dictation = undefined;
       clearCancelListener();
+      if (shuttingDown || generation !== currentGeneration) return;
       if (keepCompletionVisible) holdCompletionWidget(ctx, clearTranscribeWidget);
-      else clearTranscribeWidget(ctx);
+      else if (pending && !shuttingDown) showTranscribeStatus(ctx, 'Recovery · /voice-recover');
+      else clearRuntimeStatusWidgetWith(ctx, clearTranscribeWidget);
     }
   }
 
   async function startRecording(
     ctx: ExtensionContext,
     configured: TranscribeSettings,
+    mode: "original" | "translated",
+    currentGeneration: number,
   ): Promise<void> {
     logStep("loading audio module");
     const { createMicrophoneCapture, testMicrophonePermission } = await loadAudio();
+    if (shuttingDown || generation !== currentGeneration) return;
     if (process.platform === "darwin") {
       const micStatus = await testMicrophonePermission();
+      if (shuttingDown || generation !== currentGeneration) return;
       if (micStatus.status === "denied") {
         const openSettings = await ctx.ui.confirm(
           "Microphone access",
           "Microphone access is denied in System Settings. Open Privacy & Security → Microphone settings?",
         );
+        if (shuttingDown || generation !== currentGeneration) return;
         if (openSettings) {
           const { openMacOSMicrophoneSettings } = await import("./settings-menu.js");
           await openMacOSMicrophoneSettings(pi, ctx);
@@ -329,8 +449,8 @@ export function createPiVoiceRuntime(
         return;
       }
     }
-    const { RecordingMeter } = await loadVisualizer();
-    if (shuttingDown) return;
+    const { clearTranscribeWidget, RecordingMeter } = await loadVisualizer();
+    if (shuttingDown || generation !== currentGeneration) return;
     const meter = new RecordingMeter();
     const controller = new DictationController(transcriptionService, {
       createCapture: createMicrophoneCapture,
@@ -341,8 +461,9 @@ export function createPiVoiceRuntime(
     try {
       // Paint startup feedback before opening the native device blocks the loop.
       await new Promise<void>((resolve) => setImmediate(resolve));
-      if (shuttingDown) return;
+      if (shuttingDown || generation !== currentGeneration) return;
       await controller.start(configured);
+      if (shuttingDown || generation !== currentGeneration) return;
       if (controller.state.phase !== "listening") {
         await reportDictationError(ctx, controller);
         return;
@@ -350,17 +471,19 @@ export function createPiVoiceRuntime(
       // Key text via the same formatter as the Try It pane so the meter
       // reads exactly like the hint the user learned during setup.
       const cancelKeys = new VoiceKeys(getKeybindings()).keyText("voice.dictation.cancel");
+      ownRuntimeStatusWidget(ctx, clearTranscribeWidget);
       meter.start(ctx, {
-        action: `${displayShortcut(registeredShortcut)} to transcribe`,
+        action: `${displayShortcut(mode === 'original' ? registeredShortcut : registeredTranslationShortcut)} to transcribe`,
         discard: `${cancelKeys} to discard`,
       });
       meter.setModelState(controller.modelState);
-      recording = { dictation: controller, meter, unwatch: watchEventLoop() };
+      recording = { dictation: controller, meter, unwatch: watchEventLoop(), mode, translation: { ...configured.translation, model: configured.translation.model && { ...configured.translation.model } }, model: ctx.model };
       listenForCancel(ctx);
     } catch (error) {
       recording?.unwatch();
       recording = undefined;
       meter.stop();
+      clearOwnedStatusWidget = undefined;
       clearCancelListener();
       ctx.ui.notify(`Recording failed to start: ${error instanceof Error ? error.message : String(error)}`, "error");
     } finally {
@@ -371,7 +494,7 @@ export function createPiVoiceRuntime(
     }
   }
 
-  async function toggleCaptureTask(ctx: ExtensionContext): Promise<void> {
+  async function toggleCaptureTask(ctx: ExtensionContext, mode: "original" | "translated"): Promise<void> {
     if (shuttingDown) return;
     // A fresh action replaces the transient completion in the shared meter slot.
     cancelCompletionWidgetTimer();
@@ -379,29 +502,45 @@ export function createPiVoiceRuntime(
       await stopAndTranscribe(ctx);
       return;
     }
+    if (pending) {
+      ctx.ui.notify('Resolve the pending result with /voice-recover before recording.', 'warning');
+      return;
+    }
+    const currentGeneration = generation;
+    await captureCleanup;
+    if (shuttingDown || generation !== currentGeneration) return;
 
     // First-press module loading and microphone initialization take a
     // noticeable moment; show feedback until the recording meter takes over.
     // Static text on the shared widget slot: an animated spinner repaints every
     // frame, and the meter replaces plain lines without a component swap.
     const { clearTranscribeWidget, showTranscribeStatus } = await loadVisualizer();
+    if (shuttingDown || generation !== currentGeneration) return;
     logStep("loading settings");
     await loadSettingsOnce();
+    if (shuttingDown || generation !== currentGeneration) return;
     if (settings && existsSync(settings.model.path)) {
+      ownRuntimeStatusWidget(ctx, clearTranscribeWidget);
       showTranscribeStatus(ctx, "Starting microphone…");
     } else {
       // Setup panes replace only the editor, so a status line set here or by
       // the first-press handler in index.ts would sit above every setup step.
-      clearTranscribeWidget(ctx);
+      clearRuntimeStatusWidgetWith(ctx, clearTranscribeWidget);
     }
 
     const { configured, completedFirstRun } = await ensureSettings(ctx);
-    if (configured && !completedFirstRun) await startRecording(ctx, configured);
+    if (shuttingDown || generation !== currentGeneration) return;
+    if (configured && !completedFirstRun) {
+      if (mode === 'translated' && !configured.translation.targetLanguage) {
+        ctx.ui.notify('Choose a translation target in /voice-settings before translated recording.', 'warning');
+      } else await startRecording(ctx, configured, mode, currentGeneration);
+    }
     // The meter shares the widget slot and has replaced the spinner when
     // recording began; clear the spinner only when recording never started.
     // A finished first-run setup leaves the Ready widget in that slot with a
     // hold timer armed, so leave that one alone.
-    if (!recording && !completionWidgetTimer) clearTranscribeWidget(ctx);
+    if (!recording && !completionWidgetTimer && !shuttingDown && generation === currentGeneration)
+      clearRuntimeStatusWidgetWith(ctx, clearTranscribeWidget);
   }
 
   function runExclusive(
@@ -420,8 +559,72 @@ export function createPiVoiceRuntime(
     return nextOperation;
   }
 
-  async function toggleCapture(ctx: ExtensionContext): Promise<void> {
-    await runExclusive(ctx, () => toggleCaptureTask(ctx));
+  async function toggleCapture(ctx: ExtensionContext, mode: "original" | "translated" = 'original'): Promise<void> {
+    await runExclusive(ctx, () => toggleCaptureTask(ctx, mode));
+  }
+
+  async function recover(ctx: ExtensionCommandContext): Promise<void> {
+    if (operation || recording) { ctx.ui.notify('Finish the current voice operation before recovery.', 'warning'); return; }
+    const item = pending;
+    if (!item) { ctx.ui.notify('No pending dictation result.', 'info'); return; }
+    if (item.session !== ctx.sessionManager.getSessionId()) { pending = undefined; ctx.ui.notify('Previous session result discarded.', 'warning'); return; }
+    await runExclusive(ctx, async () => {
+      const choices = ['Retry translation', 'Insert original', ...(item.translated ? ['Insert translation'] : []), 'Discard'];
+      const choice = await ctx.ui.select('Recover dictation result', choices);
+      if (!choice || pending !== item || shuttingDown || item.session !== ctx.sessionManager.getSessionId()) return;
+      if (choice === 'Discard') {
+        pending = undefined;
+        const { clearTranscribeWidget } = await loadVisualizer();
+        clearRuntimeStatusWidgetWith(ctx, clearTranscribeWidget);
+        return;
+      }
+      if (choice === 'Retry translation') {
+        const currentGeneration = generation;
+        const abort = new AbortController();
+        translationAbort = abort;
+        const current = () => !shuttingDown && currentGeneration === generation &&
+          pending === item && item.session === ctx.sessionManager.getSessionId();
+        let visualizer: Awaited<ReturnType<typeof loadVisualizer>> | undefined;
+        listenForCancel(ctx);
+        try {
+          await loadSettingsOnce();
+          if (!current() || abort.signal.aborted) return;
+          const translation = settings?.translation;
+          if (!translation?.targetLanguage) { ctx.ui.notify('Choose a target in /voice-settings, then retry.', 'warning'); return; }
+          visualizer = await loadVisualizer();
+          if (!current() || abort.signal.aborted) return;
+          const cancelKeys = new VoiceKeys(getKeybindings()).keyText('voice.dictation.cancel');
+          ownRuntimeStatusWidget(ctx, visualizer.clearTranscribeWidget);
+          visualizer.showTranscribeStatus(ctx, 'Translating or waiting…', { cancelKeys });
+          if (!current() || abort.signal.aborted) return;
+          const result = await translationService.translate({ text: item.original, targetLanguage: translation.targetLanguage,
+            settings: { ...translation, model: translation.model && { ...translation.model } },
+            context: { model: ctx.model, modelRegistry: ctx.modelRegistry }, priority: 'dictation', signal: abort.signal });
+          if (current() && !abort.signal.aborted) item.translated = result.text;
+        } catch (error) {
+          if (!abort.signal.aborted && current())
+            ctx.ui.notify(`Translation failed: ${error instanceof Error ? error.message : 'Request failed'}. Run /voice-recover.`, 'warning');
+        } finally {
+          if (translationAbort === abort) {
+            translationAbort = undefined;
+            clearCancelListener();
+          }
+          if (current()) visualizer?.showTranscribeStatus(ctx, 'Recovery · /voice-recover');
+        }
+        return;
+      }
+      const text = choice === 'Insert original' ? item.original : item.translated;
+      if (!text || !safeEditorText(text)) { ctx.ui.notify('Unsafe transcript cannot be inserted.', 'error'); return; }
+      try {
+        if (!ctx.hasUI || !ctx.sessionManager.getSessionId()) throw new Error('No active editor');
+        ctx.ui.pasteToEditor(text);
+        pending = undefined;
+      } catch { ctx.ui.notify('Editor unavailable; result retained.', 'warning'); }
+      if (!pending) {
+        const { clearTranscribeWidget } = await loadVisualizer();
+        clearRuntimeStatusWidgetWith(ctx, clearTranscribeWidget);
+      }
+    });
   }
 
   async function showSettings(ctx: ExtensionCommandContext): Promise<void> {
@@ -443,11 +646,12 @@ export function createPiVoiceRuntime(
       if (!hadConfiguration) {
         // First-run setup ends on its Ready message rather than falling
         // straight through into the regular settings menu.
-        reload = configured.shortcut !== registeredShortcut;
+        reload = configured.shortcut !== registeredShortcut || configured.translation.shortcut !== registeredTranslationShortcut;
         return;
       }
       const { showSettingsMenu } = await import("./settings-menu.js");
-      reload = await showSettingsMenu(pi, ctx, configured, registeredShortcut);
+      reload = await showSettingsMenu(pi, ctx, configured, registeredShortcut, registeredTranslationShortcut);
+      settingsLoaded = false;
     });
     if (reload) {
       await ctx.reload();
@@ -470,6 +674,7 @@ export function createPiVoiceRuntime(
       const configured = await runOnboarding(
         ctx,
         settings?.shortcut ?? registeredShortcut,
+        settings?.translation,
       );
       if (!configured) return;
       rememberSettings(configured);
@@ -481,13 +686,12 @@ export function createPiVoiceRuntime(
 
   async function shutdown(ctx: ExtensionContext): Promise<void> {
     shuttingDown = true;
+    invalidate();
+    translationService.shutdown();
     cancelCompletionWidgetTimer();
-    const disposal = dictation?.dispose();
-    recording?.meter.stop();
-    recording?.unwatch();
     clearCancelListener();
     await Promise.all([
-      disposal,
+      captureCleanup,
       operation?.catch(() => undefined),
       transcriptionService.shutdown().catch(() => undefined),
     ]);
@@ -501,8 +705,11 @@ export function createPiVoiceRuntime(
 
   return {
     service: transcriptionService,
+    translationService,
     requireConfiguredSettingsForTool,
     toggleCapture,
+    recover,
+    invalidate,
     showSettings,
     replayOnboarding,
     shutdown,

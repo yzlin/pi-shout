@@ -7,11 +7,12 @@ import { initTheme, type ExtensionContext } from "@earendil-works/pi-coding-agen
 import type { Component } from "@earendil-works/pi-tui";
 import { Deferred } from "../src/deferred.js";
 import { CatalogModelPicker, LanguagePicker } from "../src/model-picker.js";
-import { changeOnboardingModel, runModelSelection, runOnboarding } from "../src/onboarding.js";
+import { changeOnboardingModel, chooseOnboardingShortcut, onboardingShortcutUpdate, runModelSelection, runOnboarding } from "../src/onboarding.js";
 import { RecommendedModelPicker } from "../src/recommendation-picker.js";
 import { CATALOG_MODELS } from "../src/catalog.js";
 import { recommendModels } from "../src/recommendations.js";
 import { readSettings, settingsForModel, writeSettings } from "../src/settings.js";
+import { DEFAULT_TRANSLATION_PROMPT } from "../src/translation-settings.js";
 import { cacheCatalogModel, isolatedModelCache } from "./model-cache-helper.js";
 import { keybindings, testTheme, testTui } from "./ui-helpers.js";
 
@@ -39,7 +40,7 @@ function scriptedContext(steps: Step[]) {
           pane.dispose?.();
         }
       },
-      notify: (message: string) => { assert.fail(`Unexpected notification: ${message}`); },
+      notify: (message: string) => { if (!message.startsWith("Pi Shout: speech recognition is local.")) assert.fail(`Unexpected notification: ${message}`); },
     },
   } as unknown as ExtensionContext;
   return { ctx, assertFinished: () => assert.equal(index, steps.length) };
@@ -47,7 +48,7 @@ function scriptedContext(steps: Step[]) {
 
 function isolatedSettings(t: TestContext) {
   const previous = process.env.PI_CODING_AGENT_DIR;
-  const directory = mkdtempSync(join(tmpdir(), "pi-voice-onboarding-test-"));
+  const directory = mkdtempSync(join(tmpdir(), "pi-shout-onboarding-test-"));
   process.env.PI_CODING_AGENT_DIR = directory;
   t.after(() => {
     if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
@@ -62,8 +63,31 @@ function initialSettings(languages = ["en"]) {
     shortcut: "ctrl+alt+z",
     microphone: { type: "device", name: "Test microphone", occurrence: 1 },
     chineseOutput: "traditional-taiwan",
+    translation: { shortcut: "ctrl+alt+y", targetLanguage: "zh-TW", model: { provider: "test", id: "translator" }, prompt: `${DEFAULT_TRANSLATION_PROMPT} Be concise.` },
   });
 }
+
+test("Try It cannot save the translated binding", () => {
+  const current = initialSettings();
+  assert.equal(onboardingShortcutUpdate(current, current.translation.shortcut), undefined);
+});
+
+test("Try It shortcut reset cannot choose the translated binding when it uses the original default", async () => {
+  const script = scriptedContext([
+    (pane) => {
+      pane.handleInput?.("d");
+      pane.handleInput?.("\r");
+      pane.handleInput?.("\x1b");
+    },
+  ]);
+  const result = await chooseOnboardingShortcut(
+    script.ctx,
+    "ctrl+alt+x",
+    "ctrl+alt+z",
+  );
+  script.assertFinished();
+  assert.equal(result, undefined);
+});
 
 /** Choose the primary pick from an expanded recommendation pane. */
 function selectRecommended(): Step {
@@ -112,6 +136,7 @@ for (const entry of ["recommended", "other-models", "single-pick"] as const) {
     assert.equal(result.shortcut, current.shortcut);
     assert.deepEqual(result.microphone, current.microphone);
     assert.equal(result.chineseOutput, current.chineseOutput);
+    assert.deepEqual(result.translation, current.translation);
     assert.deepEqual((await readSettings()).settings, result);
 
     // A later visit uses the newly saved languages, not the first-run closure.
@@ -222,9 +247,11 @@ test("exiting first-run languages after a committed selection preserves saved se
     },
     (_pane, done) => done(undefined),
   ]);
-  const configured = await runOnboarding(script.ctx);
+  const translation = initialSettings().translation;
+  const configured = await runOnboarding(script.ctx, "ctrl+alt+z", translation);
   script.assertFinished();
   assert.ok(configured);
+  assert.deepEqual(configured.translation, translation);
   assert.deepEqual((await readSettings()).settings, configured);
 });
 

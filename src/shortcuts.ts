@@ -46,7 +46,10 @@ export function createShortcutPicker(
   keybindings: KeybindingsManager,
   current: string,
   done: (shortcut: string | undefined) => void,
+  options: { defaultShortcut?: string; forbiddenShortcut?: string } = {},
 ): Component {
+  const defaultShortcut = options.defaultShortcut ?? DEFAULT_SHORTCUT;
+  const forbiddenShortcut = options.forbiddenShortcut;
   const keys = new VoiceKeys(keybindings);
   let phase: Phase = { kind: "waiting" };
   const container = new Container();
@@ -98,7 +101,7 @@ export function createShortcutPicker(
       container.addChild(new Spacer(1));
       container.addChild(
         new Text(
-          `${keys.hint("voice.shortcut.useDefault", `default (${displayShortcut(DEFAULT_SHORTCUT)})`)}  ${keys.hint("tui.select.cancel", "back")}`,
+          `${keys.hint("voice.shortcut.useDefault", `default (${displayShortcut(defaultShortcut)})`)}  ${keys.hint("tui.select.cancel", "back")}`,
           1,
           0,
         ),
@@ -130,11 +133,9 @@ export function createShortcutPicker(
       }
 
       if (keys.matches(data, "voice.shortcut.useDefault")) {
-        phase = {
-          kind: "preview",
-          normalized: DEFAULT_SHORTCUT,
-          conflicts: findConflicts(keybindings, DEFAULT_SHORTCUT),
-        };
+        phase = defaultShortcut === forbiddenShortcut
+          ? { kind: "error", message: "This shortcut is already used by the other dictation mode." }
+          : { kind: "preview", normalized: defaultShortcut, conflicts: findConflicts(keybindings, defaultShortcut) };
         rebuild();
         tui.requestRender();
         return;
@@ -149,6 +150,8 @@ export function createShortcutPicker(
           kind: "error",
           message: `${displayShortcut(parsed)} is not valid. Use a modifier such as Ctrl or Alt, or a function key.`,
         };
+      } else if (normalized === forbiddenShortcut) {
+        phase = { kind: "error", message: "This shortcut is already used by the other dictation mode." };
       } else {
         phase = {
           kind: "preview",

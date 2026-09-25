@@ -6,7 +6,9 @@ import {
   type CatalogModel,
 } from "./catalog.js";
 import { DEFAULT_SHORTCUT, normalizeShortcut } from "./shortcut-core.js";
-import { legacySettingsPath, settingsPath } from "./settings-path.js";
+import { settingsPath } from "./settings-path.js";
+import { defaultTranslationSettings, normalizeTranslationSettings, type TranslationSettings } from "./translation-settings.js";
+export type { TranslationSettings } from "./translation-settings.js";
 
 const SETTINGS_VERSION = 1;
 
@@ -33,6 +35,7 @@ export type TranscribeSettings = {
   version: 1;
   backend: { type: "transcribe-cpp" };
   shortcut: string;
+  translation: TranslationSettings;
   preferredLanguages: string[];
   transcriptionLanguage: TranscriptionLanguage;
   chineseOutput: ChineseOutput;
@@ -126,12 +129,17 @@ function validateSettings(value: unknown): TranscribeSettings | undefined {
 
   const preferredLanguages = normalizeLanguages(value.preferredLanguages);
   const microphone = validateMicrophone(value.microphone);
-  if (!preferredLanguages || !microphone) return undefined;
+  // Existing pi-shout configs predate translation; never read settings from another extension.
+  const translation = value.translation === undefined
+    ? defaultTranslationSettings()
+    : normalizeTranslationSettings(value.translation, shortcut);
+  if (!preferredLanguages || !microphone || !translation || translation.shortcut === shortcut) return undefined;
 
   return {
     version: SETTINGS_VERSION,
     backend: { type: "transcribe-cpp" },
     shortcut,
+    translation,
     preferredLanguages,
     transcriptionLanguage: transcriptionLanguageForModel(
       value.transcriptionLanguage,
@@ -164,26 +172,7 @@ async function readSettingsFile(path: string): Promise<SettingsReadResult> {
 }
 
 export async function readSettings(): Promise<SettingsReadResult> {
-  const currentPath = settingsPath();
-  const current = await readSettingsFile(currentPath);
-  if (current.settings || current.warning) return current;
-
-  const legacyPath = legacySettingsPath();
-  const legacy = await readSettingsFile(legacyPath);
-  if (!legacy.settings) return legacy;
-
-  try {
-    await writeSettings(legacy.settings);
-    await unlink(legacyPath).catch((error: NodeJS.ErrnoException) => {
-      if (error.code !== "ENOENT") throw error;
-    });
-    return { settings: legacy.settings };
-  } catch (error) {
-    return {
-      settings: legacy.settings,
-      warning: `Loaded legacy settings from ${legacyPath}, but could not migrate them to ${currentPath}: ${error instanceof Error ? error.message : String(error)}`,
-    };
-  }
+  return readSettingsFile(settingsPath());
 }
 
 export async function writeSettings(settings: TranscribeSettings): Promise<void> {
@@ -202,6 +191,7 @@ export async function writeSettings(settings: TranscribeSettings): Promise<void>
 
 type ModelSettingsOptions = {
   shortcut?: string;
+  translation?: TranslationSettings;
   preferredLanguages?: readonly string[];
   transcriptionLanguage?: TranscriptionLanguage;
   chineseOutput?: ChineseOutput;
@@ -218,10 +208,15 @@ export function settingsForModel(
   const preferredLanguages = [
     ...new Set((options.preferredLanguages ?? ["en"]).map(languageIdentity)),
   ];
+  const shortcut = normalizeShortcut(options.shortcut ?? DEFAULT_SHORTCUT);
+  if (!shortcut) throw new Error('Invalid original shortcut.');
+  const translation = normalizeTranslationSettings(options.translation ?? defaultTranslationSettings(), shortcut);
+  if (!translation) throw new Error('Invalid translation settings or conflicting shortcut.');
   return {
     version: SETTINGS_VERSION,
     backend: { type: "transcribe-cpp" },
-    shortcut: options.shortcut ?? DEFAULT_SHORTCUT,
+    shortcut,
+    translation,
     preferredLanguages,
     transcriptionLanguage: transcriptionLanguageForModel(
       options.transcriptionLanguage,

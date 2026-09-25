@@ -1,23 +1,18 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { existsSync } from "node:fs";
 import { registerFileTranscriptionTool } from "./file-transcription.js";
-import {
-  claimLegacyGitNotice,
-  findLegacyGitInstall,
-  legacyGitMigrationMessage,
-} from "./install-migration.js";
 import type { PiVoiceRuntime } from "./runtime.js";
 import { displayShortcut, STATUS_WIDGET_KEY } from "./shortcut-core.js";
 import { initLog, log, logStep, markKeyPress, watchEventLoop } from "./log.js";
-import { legacySettingsPath, logPath, settingsPath } from "./settings-path.js";
-import { readShortcutForRegistration } from "./startup-shortcut.js";
+import { logPath, settingsPath } from "./settings-path.js";
+import { readShortcutsForRegistration } from "./startup-shortcut.js";
 
 // Pi awaits extension module evaluation before continuing startup. Keep this
 // entry point registration-only and load feature implementations on first use.
 export default function piVoice(pi: ExtensionAPI): void {
   // Opens nothing yet: the first line written creates the file.
   initLog({ path: logPath(), level: process.env.PI_VOICE_DEBUG === "1" ? "debug" : "info" });
-  const registeredShortcut = readShortcutForRegistration();
+  const { original: registeredShortcut, translated: registeredTranslationShortcut } = readShortcutsForRegistration();
   let runtimePromise: Promise<PiVoiceRuntime> | undefined;
   let shuttingDown = false;
 
@@ -29,7 +24,7 @@ export default function piVoice(pi: ExtensionAPI): void {
     logStep("loading runtime");
     const loading = import("./runtime.js").then(({ createPiVoiceRuntime }) => {
       log.debug(`runtime loaded in ${Math.round(performance.now() - loadStarted)} ms`);
-      return createPiVoiceRuntime(pi, registeredShortcut);
+      return createPiVoiceRuntime(pi, registeredShortcut, registeredTranslationShortcut);
     });
     runtimePromise = loading;
     void loading.catch(() => {
@@ -39,22 +34,11 @@ export default function piVoice(pi: ExtensionAPI): void {
   }
 
   pi.on("session_start", async (_event, ctx) => {
-    let showedMigrationNotice = false;
-    if (ctx.mode === "tui") {
-      const legacyInstall = findLegacyGitInstall(pi.getCommands());
-      if (legacyInstall && await claimLegacyGitNotice()) {
-        ctx.ui.notify(legacyGitMigrationMessage(legacyInstall), "warning");
-        showedMigrationNotice = true;
-      }
-    }
-
-    if (
-      !showedMigrationNotice &&
-      !existsSync(settingsPath()) &&
-      !existsSync(legacySettingsPath())
-    ) {
+    const runtime = await runtimePromise?.catch(() => undefined);
+    runtime?.invalidate();
+    if (!existsSync(settingsPath())) {
       ctx.ui.notify(
-        `Pi Voice installed · press ${displayShortcut(registeredShortcut)} or run /voice-settings to set up`,
+        `Pi Shout installed · press ${displayShortcut(registeredShortcut)} or run /voice-settings to set up`,
         "info",
       );
     }
@@ -63,6 +47,7 @@ export default function piVoice(pi: ExtensionAPI): void {
   const fileTranscription = registerFileTranscriptionTool(pi, {
     getSettings: async () => (await loadRuntime()).requireConfiguredSettingsForTool(),
     getService: async () => (await loadRuntime()).service,
+    getTranslationService: async () => (await loadRuntime()).translationService,
   });
 
   pi.registerShortcut(
@@ -92,33 +77,48 @@ export default function piVoice(pi: ExtensionAPI): void {
     },
   );
 
+  pi.registerShortcut(registeredTranslationShortcut as Parameters<ExtensionAPI['registerShortcut']>[0], {
+    description: 'Toggle translated microphone dictation',
+    handler: async (ctx) => (await loadRuntime()).toggleCapture(ctx, 'translated'),
+  });
+
   const openSettings = async (
     _args: string,
     ctx: ExtensionCommandContext,
   ): Promise<void> => (await loadRuntime()).showSettings(ctx);
 
   pi.registerCommand("voice-settings", {
-    description: "Open Pi Voice settings",
+    description: "Open Pi Shout settings",
     handler: openSettings,
   });
   pi.registerCommand("transcribe", {
-    description: "Open Pi Voice settings (alias for /voice-settings)",
+    description: "Open Pi Shout settings (alias for /voice-settings)",
     handler: openSettings,
+  });
+
+  pi.registerCommand('voice-recover', {
+    description: 'Resolve a pending dictation result',
+    handler: async (_args, ctx) => (await loadRuntime()).recover(ctx),
   });
 
   if (process.env.PI_VOICE_DEBUG === "1") {
     pi.registerCommand("voice-onboarding", {
-      description: "Replay Pi Voice onboarding (debug)",
+      description: "Replay Pi Shout onboarding (debug)",
       handler: async (_args, ctx) => (await loadRuntime()).replayOnboarding(ctx),
     });
   }
 
+  const invalidateRuntime = async () => { const runtime = await runtimePromise?.catch(() => undefined); runtime?.invalidate(); };
+  pi.on('session_before_switch', invalidateRuntime);
+  pi.on('session_before_fork', invalidateRuntime);
+  pi.on('session_before_tree', invalidateRuntime);
+  pi.on('session_tree', invalidateRuntime);
   pi.on("session_shutdown", async (_event, ctx) => {
     shuttingDown = true;
-    await fileTranscription.shutdown().catch(() => undefined);
     const loading = runtimePromise;
-    if (!loading) return;
-    const runtime = await loading.catch(() => undefined);
-    await runtime?.shutdown(ctx).catch(() => undefined);
+    const runtime = await loading?.catch(() => undefined);
+    // Abort the shared provider lane before waiting for queued file operations.
+    const runtimeShutdown = runtime?.shutdown(ctx).catch(() => undefined);
+    await Promise.all([fileTranscription.shutdown().catch(() => undefined), runtimeShutdown]);
   });
 }

@@ -1,16 +1,16 @@
 {
-  "name": "@earendil-works/pi-voice",
+  "name": "pi-shout",
   "version": "0.1.0",
   "description": "Local speech-to-text for Pi",
   "type": "module",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/earendil-works/pi-voice.git"
+    "url": "git+https://github.com/yzlin/pi-shout.git"
   },
-  "homepage": "https://github.com/earendil-works/pi-voice#readme",
+  "homepage": "https://github.com/yzlin/pi-shout#readme",
   "bugs": {
-    "url": "https://github.com/earendil-works/pi-voice/issues"
+    "url": "https://github.com/yzlin/pi-shout/issues"
   },
   "files": [
     "src",
@@ -19,9 +19,6 @@
     "README.md",
     "LICENSE"
   ],
-  "publishConfig": {
-    "access": "public"
-  },
   "keywords": [
     "pi-package",
     "pi-extension",
@@ -36,7 +33,6 @@
   "scripts": {
     "check": "tsc --noEmit",
     "test": "npm run check && node scripts/run-tests.mjs",
-    "prepublishOnly": "npm test",
     "catalog:generate": "node scripts/generate-catalog.mjs",
     "recommendations:generate": "node scripts/generate-recommendations.mjs",
     "catalog:verify": "node scripts/catalog-metadata.mjs",
@@ -48,13 +44,15 @@
     ]
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "*",
-    "@earendil-works/pi-tui": "*",
+    "@earendil-works/pi-ai": ">=0.87.1",
+    "@earendil-works/pi-coding-agent": ">=0.87.1",
+    "@earendil-works/pi-tui": ">=0.87.1",
     "typebox": "*"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "0.83.0",
-    "@earendil-works/pi-tui": "^0.83.0",
+    "@earendil-works/pi-ai": "0.87.1",
+    "@earendil-works/pi-coding-agent": "0.87.1",
+    "@earendil-works/pi-tui": "0.87.1",
     "@huggingface/gguf": "^0.4.6",
     "@types/node": "22.20.1",
     "typebox": "^1.3.7",

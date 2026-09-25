@@ -28,6 +28,8 @@ import {
 } from "./settings.js";
 import { displayShortcut } from "./shortcut-core.js";
 import { createShortcutPicker } from "./shortcuts.js";
+import { DEFAULT_TRANSLATION_SHORTCUT } from "./translation-settings.js";
+import { chooseTranslationTarget, chooseTranslationModel, editTranslationPrompt, chooseTranslationShortcut, targetName, translationModelSummary, translationShortcutSummary } from "./translation-settings-ui.js";
 import {
   padToWidth,
   SingleSelectPicker,
@@ -46,7 +48,8 @@ type SettingsAction =
   | "transcription-language"
   | "chinese-output"
   | "microphone"
-  | "shortcut";
+  | "shortcut"
+  | "translation-target" | "translation-model" | "translation-prompt" | "translation-shortcut";
 
 type SettingsHomeChoice = SingleSelectChoice<SettingsAction> & {
   summary: string;
@@ -142,12 +145,18 @@ function settingsHomeChoices(
     },
     {
       value: "shortcut",
-      label: "Shortcut",
+      label: "Original shortcut",
       summary: displayShortcut(configured.shortcut),
       description: "Terminal shortcut that starts and stops microphone dictation",
     },
   );
 
+  choices.push(
+    { value: "translation-target", label: "Translation target", summary: configured.translation.targetLanguage ? `${targetName(configured.translation.targetLanguage)} (${configured.translation.targetLanguage})` : "Not set", description: "Select a target to enable translated dictation" },
+    { value: "translation-model", label: "Translation model", summary: translationModelSummary(configured.translation), description: "Available Pi model override, or inherit current chat model" },
+    { value: "translation-prompt", label: "Translation instructions", summary: configured.translation.prompt, description: "Customize instructions; transcript supplied separately" },
+    { value: "translation-shortcut", label: "Translated shortcut", summary: translationShortcutSummary(configured.translation), description: "Start translated dictation; /voice-recover handles failed translations" },
+  );
   return choices;
 }
 
@@ -166,7 +175,8 @@ async function showSettingsHome(
       choices,
       undefined,
       {
-        title: "Pi Voice settings",
+        title: "Pi Shout settings",
+        subtitle: "Audio stays local. Translation sends transcript text (not audio) to your model provider; latency, billing and retention may apply. Files: tool results enter chat history; truncated originals may use temporary files.",
         cancelLabel: "close",
         renderLabel: (choice, active, width) => {
           const row = rows.get(choice.value);
@@ -246,9 +256,10 @@ async function chooseTranscriptionLanguage(
 async function chooseShortcut(
   ctx: ExtensionContext,
   current: string,
+  forbiddenShortcut: string,
 ): Promise<string | undefined> {
   return ctx.ui.custom<string | undefined>((tui, theme, keybindings, done) =>
-    createShortcutPicker(tui, theme, keybindings, current, done),
+    createShortcutPicker(tui, theme, keybindings, current, done, { forbiddenShortcut }),
   );
 }
 
@@ -283,24 +294,39 @@ export async function offerMacOSPermissionHelp(
   if (openSettings) await openMacOSMicrophoneSettings(pi, ctx);
 }
 
+export function shortcutSettingsNeedReload(
+  configured: Pick<TranscribeSettings, "shortcut" | "translation">,
+  registeredShortcut: string,
+  registeredTranslationShortcut: string,
+): boolean {
+  return configured.shortcut !== registeredShortcut ||
+    configured.translation.shortcut !== registeredTranslationShortcut;
+}
+
 export async function showSettingsMenu(
   pi: ExtensionAPI,
   ctx: ExtensionContext,
   configured: TranscribeSettings,
   registeredShortcut: string,
+  registeredTranslationShortcut = DEFAULT_TRANSLATION_SHORTCUT,
+  permissionProbe: typeof testMicrophonePermission = testMicrophonePermission,
 ): Promise<boolean> {
   if (ctx.mode !== "tui") {
-    ctx.ui.notify("Pi Voice settings require the interactive TUI", "error");
+    ctx.ui.notify("Pi Shout settings require the interactive TUI", "error");
     return false;
   }
 
-  let reload = configured.shortcut !== registeredShortcut;
+  const needsReload = () => shortcutSettingsNeedReload(
+    configured,
+    registeredShortcut,
+    registeredTranslationShortcut,
+  );
   // Checked on open and refreshed whenever the Microphone row is activated,
   // where access problems are surfaced and fixed.
-  let permission = await testMicrophonePermission();
+  let permission = await permissionProbe();
   while (true) {
     const action = await showSettingsHome(ctx, configured, permission);
-    if (!action) return reload;
+    if (!action) return needsReload();
 
     if (action === "preferred-languages") {
       const selection = await chooseLanguages(ctx, configured.preferredLanguages, {
@@ -321,6 +347,7 @@ export async function showSettingsMenu(
     if (action === "model") {
       const updated = await runModelSelection(ctx, {
         shortcut: configured.shortcut,
+        translation: configured.translation,
         preferredLanguages: configured.preferredLanguages,
         transcriptionLanguage: configured.transcriptionLanguage,
         chineseOutput: configured.chineseOutput,
@@ -372,7 +399,7 @@ export async function showSettingsMenu(
     }
 
     if (action === "microphone") {
-      permission = await testMicrophonePermission();
+      permission = await permissionProbe();
       if (permission.status === "denied" && process.platform === "darwin") {
         // Choosing a device is pointless while capture is blocked; go
         // straight to the fix.
@@ -392,19 +419,46 @@ export async function showSettingsMenu(
     }
 
     if (action === "shortcut") {
-      const shortcut = await chooseShortcut(ctx, configured.shortcut);
+      const shortcut = await chooseShortcut(ctx, configured.shortcut, configured.translation.shortcut);
       if (!shortcut || shortcut === configured.shortcut) continue;
       const saved = await saveUpdatedSettings(ctx, configured, {
         ...configured,
         shortcut,
       });
       if (saved) {
-        reload = configured.shortcut !== registeredShortcut;
         ctx.ui.notify(
           `Shortcut saved as ${displayShortcut(shortcut)}. It will apply when settings close; other open Pi processes must be reloaded separately.`,
           "info",
         );
       }
+      continue;
+    }
+
+    let translation: TranscribeSettings["translation"] | undefined;
+    switch (action) {
+      case "translation-target":
+        translation = await chooseTranslationTarget(ctx, configured.translation);
+        break;
+      case "translation-model":
+        translation = await chooseTranslationModel(ctx, configured.translation);
+        break;
+      case "translation-prompt":
+        translation = await editTranslationPrompt(ctx, configured.translation);
+        break;
+      case "translation-shortcut":
+        translation = await chooseTranslationShortcut(ctx, configured.translation, configured.shortcut);
+        break;
+      default:
+        continue;
+    }
+    if (!translation || JSON.stringify(translation) === JSON.stringify(configured.translation)) continue;
+
+    const saved = await saveUpdatedSettings(ctx, configured, { ...configured, translation });
+    if (saved && action === "translation-shortcut") {
+      ctx.ui.notify(
+        "Translated shortcut saved. It will apply when settings close; other open Pi processes must be reloaded separately.",
+        "info",
+      );
     }
   }
 }
