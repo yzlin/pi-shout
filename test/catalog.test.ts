@@ -60,8 +60,97 @@ test("startup preserves a custom original shortcut when translation settings are
   assert.deepEqual(readShortcutsForRegistration(), {
     original: "ctrl+alt+x",
     translated: "ctrl+alt+t",
+    swap: "ctrl+alt+s",
   });
   assert.deepEqual((await readSettings()).settings, settings);
+
+  const { swapShortcut: _swapShortcut, ...legacyTranslation } = settings.translation;
+  await writeFile(join(directory, "pi-shout.json"), `${JSON.stringify({ ...settings, translation: legacyTranslation })}\n`);
+  assert.deepEqual((await readSettings()).settings, settings);
+  assert.deepEqual(readShortcutsForRegistration(), {
+    original: "ctrl+alt+x",
+    translated: "ctrl+alt+t",
+    swap: "ctrl+alt+s",
+  });
+});
+
+test("missing swap shortcuts migrate without replacing existing dictation bindings", async (t) => {
+  const previous = process.env.PI_CODING_AGENT_DIR;
+  const directory = await mkdtemp(join(tmpdir(), "pi-shout-swap-migration-test-"));
+  process.env.PI_CODING_AGENT_DIR = directory;
+  t.after(async () => {
+    if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previous;
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  const base = settingsForModel("parakeet-unified-en-0.6b", "/tmp/model");
+  const withoutSwap = (shortcut: string) => {
+    const { swapShortcut: _swapShortcut, ...translation } = {
+      ...base.translation,
+      shortcut,
+    };
+    return translation;
+  };
+  const cases = [
+    {
+      saved: { ...base, shortcut: "ctrl+alt+s", translation: withoutSwap("ctrl+alt+t") },
+      expected: { original: "ctrl+alt+s", translated: "ctrl+alt+t", swap: "ctrl+alt+d" },
+    },
+    {
+      saved: { ...base, translation: withoutSwap("ctrl+alt+s") },
+      expected: { original: "ctrl+alt+z", translated: "ctrl+alt+s", swap: "ctrl+alt+d" },
+    },
+    {
+      saved: (({ translation: _translation, ...settings }) => ({ ...settings, shortcut: "ctrl+alt+s" }))(base),
+      expected: { original: "ctrl+alt+s", translated: "ctrl+alt+t", swap: "ctrl+alt+d" },
+    },
+    {
+      saved: { ...base, shortcut: "ctrl+alt+s", translation: withoutSwap("ctrl+alt+d") },
+      expected: { original: "ctrl+alt+s", translated: "ctrl+alt+d", swap: "ctrl+alt+w" },
+    },
+    {
+      saved: { ...base, translation: { ...base.translation, swapShortcut: "ctrl+alt+x" } },
+      expected: { original: "ctrl+alt+z", translated: "ctrl+alt+t", swap: "ctrl+alt+x" },
+    },
+  ] as const;
+
+  for (const { saved, expected } of cases) {
+    await writeFile(join(directory, "pi-shout.json"), `${JSON.stringify(saved)}\n`);
+    const loaded = (await readSettings()).settings;
+    assert.ok(loaded);
+    assert.deepEqual({
+      original: loaded.shortcut,
+      translated: loaded.translation.shortcut,
+      swap: loaded.translation.swapShortcut,
+    }, expected);
+    assert.deepEqual(readShortcutsForRegistration(), expected);
+  }
+});
+
+test("explicit invalid or colliding swap shortcuts remain rejected", async (t) => {
+  const previous = process.env.PI_CODING_AGENT_DIR;
+  const directory = await mkdtemp(join(tmpdir(), "pi-shout-invalid-swap-test-"));
+  process.env.PI_CODING_AGENT_DIR = directory;
+  t.after(async () => {
+    if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previous;
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  const base = settingsForModel("parakeet-unified-en-0.6b", "/tmp/model");
+  for (const swapShortcut of [base.shortcut, base.translation.shortcut, "not-a-shortcut"]) {
+    await writeFile(join(directory, "pi-shout.json"), `${JSON.stringify({
+      ...base,
+      translation: { ...base.translation, swapShortcut },
+    })}\n`);
+    assert.equal((await readSettings()).settings, undefined);
+    assert.deepEqual(readShortcutsForRegistration(), {
+      original: "ctrl+alt+z",
+      translated: "ctrl+alt+t",
+      swap: "ctrl+alt+s",
+    });
+  }
 });
 
 test("foreign voice and transcribe settings are neither loaded nor modified", async (t) => {
@@ -91,12 +180,16 @@ test("foreign voice and transcribe settings are neither loaded nor modified", as
   });
   await writeSettings(own);
   assert.equal(readShortcutsForRegistration().original, "ctrl+alt+y");
-  assert.deepEqual(readShortcutsForRegistration(), { original: 'ctrl+alt+y', translated: 'ctrl+alt+t' });
+  assert.deepEqual(readShortcutsForRegistration(), { original: 'ctrl+alt+y', translated: 'ctrl+alt+t', swap: 'ctrl+alt+s' });
   assert.deepEqual((await readSettings()).settings, own);
   await writeSettings({ ...own, translation: { ...own.translation, shortcut: 'ctrl+alt+r', targetLanguage: 'en' } });
-  assert.deepEqual(readShortcutsForRegistration(), { original: 'ctrl+alt+y', translated: 'ctrl+alt+r' });
+  assert.deepEqual(readShortcutsForRegistration(), { original: 'ctrl+alt+y', translated: 'ctrl+alt+r', swap: 'ctrl+alt+s' });
   await writeSettings({ ...own, translation: { ...own.translation, shortcut: 'ctrl+alt+y' } });
-  assert.equal(readShortcutsForRegistration().translated, 'ctrl+alt+t');
+  assert.deepEqual(readShortcutsForRegistration(), { original: 'ctrl+alt+z', translated: 'ctrl+alt+t', swap: 'ctrl+alt+s' });
+  await writeSettings({ ...own, translation: { ...own.translation, swapShortcut: 'ctrl+alt+y' } });
+  assert.deepEqual(readShortcutsForRegistration(), { original: 'ctrl+alt+z', translated: 'ctrl+alt+t', swap: 'ctrl+alt+s' });
+  await writeSettings({ ...own, translation: { ...own.translation, swapShortcut: own.translation.shortcut } });
+  assert.deepEqual(readShortcutsForRegistration(), { original: 'ctrl+alt+z', translated: 'ctrl+alt+t', swap: 'ctrl+alt+s' });
   for (const name of ["pi-voice.json", "pi-transcribe.json"]) {
     assert.equal(await readFile(join(directory, name), "utf8"), content);
   }

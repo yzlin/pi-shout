@@ -13,6 +13,7 @@ function context(options: { mode?: 'tui' | 'rpc'; choice?: string; modelRegistry
   const notices: string[] = [];
   const pastes: string[] = [];
   const widgets: unknown[] = [];
+  const widgetEntries: Array<{ key: string; value: unknown }> = [];
   const listeners = new Set<(data: string) => { consume?: boolean; data?: string } | undefined>();
   const state = { text: '', session: 'session', leaf: 'leaf' };
   const ctx = {
@@ -21,19 +22,20 @@ function context(options: { mode?: 'tui' | 'rpc'; choice?: string; modelRegistry
     sessionManager: { getSessionId: () => state.session, getLeafId: () => state.leaf },
     ui: {
       notify: (text: string) => notices.push(text),
-      pasteToEditor: (text: string) => pastes.push(text),
+      pasteToEditor: (text: string) => { pastes.push(text); state.text += text; },
+      setEditorText: (text: string) => { state.text = text.replaceAll('\r', '\n').replaceAll('\t', '  '); },
       getEditorText: () => state.text,
       onTerminalInput: (handler: (data: string) => { consume?: boolean; data?: string } | undefined) => {
         listeners.add(handler); return () => { listeners.delete(handler); };
       },
-      setWidget: (_key: string, value: unknown) => widgets.push(value),
+      setWidget: (key: string, value: unknown) => { widgets.push(value); widgetEntries.push({ key, value }); },
       theme: { fg: (_color: string, text: string) => text },
       select: async () => options.choice,
       confirm: async () => false,
     },
     reload: async () => {},
   } as unknown as ExtensionContext & ExtensionCommandContext;
-  return { ctx, notices, pastes, widgets, state, listeners, input(data: string) {
+  return { ctx, notices, pastes, widgets, widgetEntries, state, listeners, input(data: string) {
     for (const listener of listeners) {
       const result = listener(data);
       if (result?.consume) return;
@@ -49,7 +51,7 @@ async function configuredDirectory(t: TestContext) {
   await writeFile(modelPath, 'fake');
   process.env.PI_CODING_AGENT_DIR = directory;
   const settings = settingsForModel('parakeet-unified-en-0.6b', modelPath, {
-    translation: { shortcut: 'ctrl+alt+t', targetLanguage: 'en', prompt: 'Translate to {targetLanguage}' },
+    translation: { shortcut: 'ctrl+alt+t', swapShortcut: 'ctrl+alt+s', targetLanguage: 'en', prompt: 'Translate to {targetLanguage}' },
   });
   await writeFile(join(directory, 'pi-shout.json'), JSON.stringify(settings));
   t.after(async () => {
@@ -84,7 +86,7 @@ test('real runtime translates Chinese and either shortcut stops the mode that st
       }) };
     },
   };
-  const runtime = createPiVoiceRuntime({} as ExtensionAPI, 'ctrl+alt+z', 'ctrl+alt+t', {
+  const runtime = createPiVoiceRuntime({} as ExtensionAPI, 'ctrl+alt+z', 'ctrl+alt+t', 'ctrl+alt+s', {
     transcriptionService: fakeService(),
     loadAudio: async () => ({
       testMicrophonePermission: async () => ({ status: 'granted' as const }),
@@ -101,10 +103,163 @@ test('real runtime translates Chinese and either shortcut stops the mode that st
   await runtime.shutdown(view.ctx);
 });
 
+test('translated empty-editor insertion creates independently editable swappable drafts', { timeout: 3000 }, async (t) => {
+  await configuredDirectory(t);
+  const { runtime } = runtimeHarness();
+  const remote = provider();
+  const view = context({ modelRegistry: remote.registry });
+  await runtime.toggleCapture(view.ctx, 'translated');
+  const stopping = runtime.toggleCapture(view.ctx, 'translated');
+  await remote.entered();
+  remote.calls[0]!.result.resolve(response('Hello'));
+  await stopping;
+  assert.equal(view.state.text, 'Hello');
+
+  runtime.swap(view.ctx);
+  assert.equal(view.state.text, '你好');
+  view.state.text = 'edited original';
+  runtime.swap(view.ctx);
+  assert.equal(view.state.text, 'Hello');
+  view.state.text = 'edited translation';
+  runtime.swap(view.ctx);
+  assert.equal(view.state.text, 'edited original');
+  runtime.swap(view.ctx);
+  assert.equal(view.state.text, 'edited translation');
+  assert.equal(remote.calls.length, 1, 'swapping makes no provider request');
+
+  view.input('\r');
+  view.state.text = '';
+  await turn();
+  runtime.swap(view.ctx);
+  assert.equal(view.state.text, '', 'submitted pair cannot revive');
+  await runtime.shutdown(view.ctx);
+});
+
+test('clearing a translated pair cannot be immediately undone by swapping', { timeout: 3000 }, async (t) => {
+  await configuredDirectory(t);
+  const { runtime } = runtimeHarness();
+  const remote = provider();
+  const view = context({ modelRegistry: remote.registry });
+  await runtime.toggleCapture(view.ctx, 'translated');
+  const stopping = runtime.toggleCapture(view.ctx, 'translated');
+  await remote.entered();
+  remote.calls[0]!.result.resolve(response('Hello'));
+  await stopping;
+
+  view.input('\u0003'); // Raw listeners run before the native editor handles clear.
+  view.state.text = '';
+  runtime.swap(view.ctx);
+  assert.equal(view.state.text, '', 'an immediate swap cannot revive the cleared pair');
+  await runtime.shutdown(view.ctx);
+});
+
+test('an empty editor observed before later input drops the old pair synchronously', { timeout: 3000 }, async (t) => {
+  await configuredDirectory(t);
+  const { runtime } = runtimeHarness();
+  const remote = provider();
+  const view = context({ modelRegistry: remote.registry });
+  await runtime.toggleCapture(view.ctx, 'translated');
+  const stopping = runtime.toggleCapture(view.ctx, 'translated');
+  await remote.entered();
+  remote.calls[0]!.result.resolve(response('Hello'));
+  await stopping;
+
+  view.input('\u0003');
+  view.state.text = '';
+  view.input('N'); // Listener sees the result of clear before native input runs.
+  view.state.text = 'NEW PROMPT';
+  await turn();
+  runtime.swap(view.ctx);
+  assert.equal(view.state.text, 'NEW PROMPT', 'new input cannot be replaced by a stale pair');
+  await runtime.shutdown(view.ctx);
+});
+
+test('translated dictation previews the original before translation settles and disables swapping for a nonempty editor', { timeout: 3000 }, async (t) => {
+  await configuredDirectory(t);
+  const { runtime } = runtimeHarness();
+  const remote = provider();
+  const view = context({ modelRegistry: remote.registry });
+  view.state.text = 'existing ';
+  await runtime.toggleCapture(view.ctx, 'translated');
+  const stopping = runtime.toggleCapture(view.ctx, 'translated');
+  await remote.entered();
+  assert.equal(view.widgetEntries.some(entry => entry.key === 'pi-shout-dictation-preview' && typeof entry.value === 'function'), true);
+  remote.calls[0]!.result.resolve(response('Hello'));
+  await stopping;
+  assert.equal(view.state.text, 'existing Hello');
+  runtime.swap(view.ctx);
+  assert.equal(view.state.text, 'existing Hello');
+  view.input('\r');
+  view.state.text = '';
+  await turn();
+  assert.equal(view.widgetEntries.filter(entry => entry.key === 'pi-shout-dictation-preview').at(-1)?.value, undefined);
+  await runtime.shutdown(view.ctx);
+});
+
+test('empty-editor recovery insertion creates a pair after a successful retry', { timeout: 3000 }, async (t) => {
+  await configuredDirectory(t);
+  const { runtime } = runtimeHarness();
+  const remote = provider();
+  const view = context({ modelRegistry: remote.registry, choice: 'Retry translation' });
+  await runtime.toggleCapture(view.ctx, 'translated');
+  const stopping = runtime.toggleCapture(view.ctx, 'translated');
+  await remote.entered();
+  remote.calls[0]!.result.reject(new Error('offline'));
+  await stopping;
+
+  const retrying = runtime.recover(view.ctx);
+  while (remote.calls.length < 2) await turn();
+  remote.calls[1]!.result.resolve(response('Bonjour'));
+  await retrying;
+  view.ctx.ui.select = async () => 'Insert original';
+  await runtime.recover(view.ctx);
+  assert.equal(view.state.text, '你好');
+  runtime.swap(view.ctx);
+  assert.equal(view.state.text, 'Bonjour');
+  assert.equal(remote.calls.length, 2);
+  await runtime.shutdown(view.ctx);
+});
+
+test('starting a later recording drops a pair without changing its active editor text', { timeout: 3000 }, async (t) => {
+  await configuredDirectory(t);
+  const { runtime } = runtimeHarness();
+  const remote = provider();
+  const view = context({ modelRegistry: remote.registry });
+  await runtime.toggleCapture(view.ctx, 'translated');
+  const stopping = runtime.toggleCapture(view.ctx, 'translated');
+  await remote.entered();
+  remote.calls[0]!.result.resolve(response('Hello'));
+  await stopping;
+  view.state.text = 'edited translation';
+  await runtime.toggleCapture(view.ctx, 'original');
+  assert.equal(view.state.text, 'edited translation');
+  runtime.swap(view.ctx);
+  assert.equal(view.state.text, 'edited translation');
+  await runtime.shutdown(view.ctx);
+});
+
+test('RPC insertion resolves pending even though synchronous editor readback stays empty', { timeout: 3000 }, async (t) => {
+  await configuredDirectory(t);
+  const { runtime } = runtimeHarness();
+  const view = context({ mode: 'rpc', choice: 'Insert original' });
+  view.ctx.ui.pasteToEditor = (text: string) => { view.pastes.push(text); };
+  view.ctx.ui.getEditorText = () => '';
+
+  await runtime.toggleCapture(view.ctx);
+  await runtime.toggleCapture(view.ctx);
+  assert.deepEqual(view.pastes, [], 'RPC auto-insertion remains destination-guarded');
+  await runtime.recover(view.ctx);
+  assert.deepEqual(view.pastes, ['你好']);
+  await runtime.recover(view.ctx);
+  assert.deepEqual(view.pastes, ['你好'], 'resolved RPC insertion is not offered a second time');
+  assert.match(view.notices.at(-1)!, /No pending/);
+  await runtime.shutdown(view.ctx);
+});
+
 test('pending result blocks both recording modes and canceled retry retains the original', { timeout: 3000 }, async (t) => {
   await configuredDirectory(t);
   let captures = 0;
-  const runtime = createPiVoiceRuntime({} as ExtensionAPI, 'ctrl+alt+z', 'ctrl+alt+t', {
+  const runtime = createPiVoiceRuntime({} as ExtensionAPI, 'ctrl+alt+z', 'ctrl+alt+t', 'ctrl+alt+s', {
     transcriptionService: fakeService(),
     loadAudio: async () => ({
       testMicrophonePermission: async () => ({ status: 'granted' as const }),
@@ -155,7 +310,7 @@ test('invalidation while audio module is pending prevents late capture and UI pa
   const audioReady = deferred<void>();
   const releaseAudio = deferred<void>();
   let captures = 0;
-  const runtime = createPiVoiceRuntime({} as ExtensionAPI, 'ctrl+alt+z', 'ctrl+alt+t', {
+  const runtime = createPiVoiceRuntime({} as ExtensionAPI, 'ctrl+alt+z', 'ctrl+alt+t', 'ctrl+alt+s', {
     transcriptionService: fakeService(),
     loadAudio: async () => {
       audioReady.resolve();
@@ -183,7 +338,7 @@ test('invalidation while audio module is pending prevents late capture and UI pa
 
 function runtimeHarness(service = fakeService(), stop: () => Promise<{ pcm: Float32Array }> = async () => ({ pcm: new Float32Array([0.1]) })) {
   let captures = 0;
-  const runtime = createPiVoiceRuntime({} as ExtensionAPI, 'ctrl+alt+z', 'ctrl+alt+t', {
+  const runtime = createPiVoiceRuntime({} as ExtensionAPI, 'ctrl+alt+z', 'ctrl+alt+t', 'ctrl+alt+s', {
     transcriptionService: service,
     loadAudio: async () => ({
       testMicrophonePermission: async () => ({ status: 'granted' as const }),
@@ -217,7 +372,7 @@ for (const mode of ['original', 'translated'] as const) {
     await stopping;
     assert.deepEqual(view.pastes, [mode === 'translated' ? 'Hello' : '你好']);
     assert.equal(view.notices.some(notice => notice.includes('held for recovery')), false);
-    assert.equal(view.listeners.size, 0);
+    assert.equal(view.listeners.size, mode === 'translated' ? 1 : 0);
   });
 }
 
@@ -460,7 +615,7 @@ test('invalidation at the scheduled pre-start boundary prevents opening the capt
   let captures = 0;
   let paints = 0;
   const view = context();
-  const runtime = createPiVoiceRuntime({} as ExtensionAPI, 'ctrl+alt+z', 'ctrl+alt+t', {
+  const runtime = createPiVoiceRuntime({} as ExtensionAPI, 'ctrl+alt+z', 'ctrl+alt+t', 'ctrl+alt+s', {
     transcriptionService: fakeService(),
     loadAudio: async () => {
       // This immediate precedes runtime's explicit pre-start immediate.
@@ -481,7 +636,7 @@ test('macOS permission await is invalidated without capture or repaint', { timeo
   const permission = deferred<{ status: 'granted' }>();
   let captures = 0;
   const view = context();
-  const runtime = createPiVoiceRuntime({} as ExtensionAPI, 'ctrl+alt+z', 'ctrl+alt+t', {
+  const runtime = createPiVoiceRuntime({} as ExtensionAPI, 'ctrl+alt+z', 'ctrl+alt+t', 'ctrl+alt+s', {
     transcriptionService: fakeService(),
     loadAudio: async () => ({ testMicrophonePermission: () => { entered.resolve(); return permission.promise; },
       createMicrophoneCapture: () => { captures++; return { start() {}, stop: async () => ({ pcm: new Float32Array() }) }; } }),

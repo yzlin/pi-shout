@@ -39,7 +39,7 @@ async function harness(t: TestContext, options: {
   const path = join(directory, 'public-sample.wav');
   await writeFile(path, 'dummy regular file; decoded only by fake');
   const configured = settingsForModel('parakeet-unified-en-0.6b', path, {
-    translation: { shortcut: 'ctrl+alt+t', targetLanguage: 'en', prompt: 'Translate to {targetLanguage}' },
+    translation: { shortcut: 'ctrl+alt+t', swapShortcut: 'ctrl+alt+s', targetLanguage: 'en', prompt: 'Translate to {targetLanguage}' },
   });
   const remote = provider();
   const translation = options.translation ?? new TranslationService();
@@ -134,7 +134,7 @@ for (const failure of ['incomplete', 'provider']) {
 }
 
 for (const target of [undefined, 'en']) {
-  for (const original of ['公开样本'.repeat(20000), 'public sample\n'.repeat(DEFAULT_MAX_LINES + 20)]) {
+  for (const original of ['公開樣本'.repeat(20000), 'public sample\n'.repeat(DEFAULT_MAX_LINES + 20)]) {
     test(`long ${original.includes('\n') ? 'multiline' : 'UTF8'} original ${target ? 'translation failure' : 'ASR'} is complete in private file with bounded notice`, { timeout: 3000 }, async (t) => {
       const h = await harness(t, { text: original });
       const result = await h.execute('long', target);
@@ -244,7 +244,7 @@ test('shutdown aborts active and translation-queued files; late provider respons
 });
 
 test('actual file tools share runtime translation lane: active file is not preempted, waiting dictation precedes waiting file', { timeout: 3000 }, async (t) => {
-  const runtime = createPiVoiceRuntime({} as ExtensionAPI, 'ctrl+alt+z');
+  const runtime = createPiVoiceRuntime({} as ExtensionAPI, 'ctrl+alt+z', 'ctrl+alt+t', 'ctrl+alt+s');
   const h = await harness(t, { translation: runtime.translationService });
   const first = h.execute('first', 'en');
   await h.remote.entered();

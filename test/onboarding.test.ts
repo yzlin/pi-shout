@@ -63,13 +63,14 @@ function initialSettings(languages = ["en"]) {
     shortcut: "ctrl+alt+z",
     microphone: { type: "device", name: "Test microphone", occurrence: 1 },
     chineseOutput: "traditional-taiwan",
-    translation: { shortcut: "ctrl+alt+y", targetLanguage: "zh-TW", model: { provider: "test", id: "translator" }, prompt: `${DEFAULT_TRANSLATION_PROMPT} Be concise.` },
+    translation: { shortcut: "ctrl+alt+y", swapShortcut: "ctrl+alt+s", targetLanguage: "zh-TW", model: { provider: "test", id: "translator" }, prompt: `${DEFAULT_TRANSLATION_PROMPT} Be concise.` },
   });
 }
 
 test("Try It cannot save the translated binding", () => {
   const current = initialSettings();
   assert.equal(onboardingShortcutUpdate(current, current.translation.shortcut), undefined);
+  assert.equal(onboardingShortcutUpdate(current, current.translation.swapShortcut), undefined);
 });
 
 test("Try It shortcut reset cannot choose the translated binding when it uses the original default", async () => {
@@ -83,7 +84,7 @@ test("Try It shortcut reset cannot choose the translated binding when it uses th
   const result = await chooseOnboardingShortcut(
     script.ctx,
     "ctrl+alt+x",
-    "ctrl+alt+z",
+    ["ctrl+alt+z"],
   );
   script.assertFinished();
   assert.equal(result, undefined);

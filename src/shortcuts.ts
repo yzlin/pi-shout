@@ -46,10 +46,10 @@ export function createShortcutPicker(
   keybindings: KeybindingsManager,
   current: string,
   done: (shortcut: string | undefined) => void,
-  options: { defaultShortcut?: string; forbiddenShortcut?: string } = {},
+  options: { defaultShortcut?: string; forbiddenShortcuts?: readonly string[] } = {},
 ): Component {
   const defaultShortcut = options.defaultShortcut ?? DEFAULT_SHORTCUT;
-  const forbiddenShortcut = options.forbiddenShortcut;
+  const forbiddenShortcuts = options.forbiddenShortcuts ?? [];
   const keys = new VoiceKeys(keybindings);
   let phase: Phase = { kind: "waiting" };
   const container = new Container();
@@ -133,8 +133,8 @@ export function createShortcutPicker(
       }
 
       if (keys.matches(data, "voice.shortcut.useDefault")) {
-        phase = defaultShortcut === forbiddenShortcut
-          ? { kind: "error", message: "This shortcut is already used by the other dictation mode." }
+        phase = forbiddenShortcuts.includes(defaultShortcut)
+          ? { kind: "error", message: "This shortcut is already used by another dictation action." }
           : { kind: "preview", normalized: defaultShortcut, conflicts: findConflicts(keybindings, defaultShortcut) };
         rebuild();
         tui.requestRender();
@@ -150,8 +150,8 @@ export function createShortcutPicker(
           kind: "error",
           message: `${displayShortcut(parsed)} is not valid. Use a modifier such as Ctrl or Alt, or a function key.`,
         };
-      } else if (normalized === forbiddenShortcut) {
-        phase = { kind: "error", message: "This shortcut is already used by the other dictation mode." };
+      } else if (forbiddenShortcuts.includes(normalized)) {
+        phase = { kind: "error", message: "This shortcut is already used by another dictation action." };
       } else {
         phase = {
           kind: "preview",

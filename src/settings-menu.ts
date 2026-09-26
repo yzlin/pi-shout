@@ -28,8 +28,8 @@ import {
 } from "./settings.js";
 import { displayShortcut } from "./shortcut-core.js";
 import { createShortcutPicker } from "./shortcuts.js";
-import { DEFAULT_TRANSLATION_SHORTCUT } from "./translation-settings.js";
-import { chooseTranslationTarget, chooseTranslationModel, editTranslationPrompt, chooseTranslationShortcut, targetName, translationModelSummary, translationShortcutSummary } from "./translation-settings-ui.js";
+import { DEFAULT_TRANSLATION_SHORTCUT, DEFAULT_TRANSLATION_SWAP_SHORTCUT } from "./translation-settings.js";
+import { chooseTranslationTarget, chooseTranslationModel, editTranslationPrompt, chooseTranslationShortcut, chooseTranslationSwapShortcut, targetName, translationModelSummary, translationShortcutSummary } from "./translation-settings-ui.js";
 import {
   padToWidth,
   SingleSelectPicker,
@@ -49,7 +49,7 @@ type SettingsAction =
   | "chinese-output"
   | "microphone"
   | "shortcut"
-  | "translation-target" | "translation-model" | "translation-prompt" | "translation-shortcut";
+  | "translation-target" | "translation-model" | "translation-prompt" | "translation-shortcut" | "translation-swap-shortcut";
 
 type SettingsHomeChoice = SingleSelectChoice<SettingsAction> & {
   summary: string;
@@ -156,6 +156,7 @@ function settingsHomeChoices(
     { value: "translation-model", label: "Translation model", summary: translationModelSummary(configured.translation), description: "Available Pi model override, or inherit current chat model" },
     { value: "translation-prompt", label: "Translation instructions", summary: configured.translation.prompt, description: "Customize instructions; transcript supplied separately" },
     { value: "translation-shortcut", label: "Translated shortcut", summary: translationShortcutSummary(configured.translation), description: "Start translated dictation; /voice-recover handles failed translations" },
+    { value: "translation-swap-shortcut", label: "Swap draft shortcut", summary: displayShortcut(configured.translation.swapShortcut), description: "Swap between the original and translated editable drafts" },
   );
   return choices;
 }
@@ -256,10 +257,10 @@ async function chooseTranscriptionLanguage(
 async function chooseShortcut(
   ctx: ExtensionContext,
   current: string,
-  forbiddenShortcut: string,
+  forbiddenShortcuts: readonly string[],
 ): Promise<string | undefined> {
   return ctx.ui.custom<string | undefined>((tui, theme, keybindings, done) =>
-    createShortcutPicker(tui, theme, keybindings, current, done, { forbiddenShortcut }),
+    createShortcutPicker(tui, theme, keybindings, current, done, { forbiddenShortcuts }),
   );
 }
 
@@ -298,9 +299,11 @@ export function shortcutSettingsNeedReload(
   configured: Pick<TranscribeSettings, "shortcut" | "translation">,
   registeredShortcut: string,
   registeredTranslationShortcut: string,
+  registeredSwapShortcut = DEFAULT_TRANSLATION_SWAP_SHORTCUT,
 ): boolean {
   return configured.shortcut !== registeredShortcut ||
-    configured.translation.shortcut !== registeredTranslationShortcut;
+    configured.translation.shortcut !== registeredTranslationShortcut ||
+    configured.translation.swapShortcut !== registeredSwapShortcut;
 }
 
 export async function showSettingsMenu(
@@ -309,6 +312,7 @@ export async function showSettingsMenu(
   configured: TranscribeSettings,
   registeredShortcut: string,
   registeredTranslationShortcut = DEFAULT_TRANSLATION_SHORTCUT,
+  registeredSwapShortcut = DEFAULT_TRANSLATION_SWAP_SHORTCUT,
   permissionProbe: typeof testMicrophonePermission = testMicrophonePermission,
 ): Promise<boolean> {
   if (ctx.mode !== "tui") {
@@ -320,6 +324,7 @@ export async function showSettingsMenu(
     configured,
     registeredShortcut,
     registeredTranslationShortcut,
+    registeredSwapShortcut,
   );
   // Checked on open and refreshed whenever the Microphone row is activated,
   // where access problems are surfaced and fixed.
@@ -419,7 +424,10 @@ export async function showSettingsMenu(
     }
 
     if (action === "shortcut") {
-      const shortcut = await chooseShortcut(ctx, configured.shortcut, configured.translation.shortcut);
+      const shortcut = await chooseShortcut(ctx, configured.shortcut, [
+        configured.translation.shortcut,
+        configured.translation.swapShortcut,
+      ]);
       if (!shortcut || shortcut === configured.shortcut) continue;
       const saved = await saveUpdatedSettings(ctx, configured, {
         ...configured,
@@ -448,15 +456,18 @@ export async function showSettingsMenu(
       case "translation-shortcut":
         translation = await chooseTranslationShortcut(ctx, configured.translation, configured.shortcut);
         break;
+      case "translation-swap-shortcut":
+        translation = await chooseTranslationSwapShortcut(ctx, configured.translation, configured.shortcut);
+        break;
       default:
         continue;
     }
     if (!translation || JSON.stringify(translation) === JSON.stringify(configured.translation)) continue;
 
     const saved = await saveUpdatedSettings(ctx, configured, { ...configured, translation });
-    if (saved && action === "translation-shortcut") {
+    if (saved && (action === "translation-shortcut" || action === "translation-swap-shortcut")) {
       ctx.ui.notify(
-        "Translated shortcut saved. It will apply when settings close; other open Pi processes must be reloaded separately.",
+        "Translation shortcut saved. It will apply when settings close; other open Pi processes must be reloaded separately.",
         "info",
       );
     }

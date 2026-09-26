@@ -13,7 +13,7 @@ function settings(modelPath: string): TranscribeSettings {
     version: 1,
     backend: { type: "transcribe-cpp" },
     shortcut: "ctrl+alt+z",
-    translation: { shortcut: "ctrl+alt+t", prompt: "Translate to {targetLanguage}." },
+    translation: { shortcut: "ctrl+alt+t", swapShortcut: "ctrl+alt+s", prompt: "Translate to {targetLanguage}." },
     preferredLanguages: ["en"],
     transcriptionLanguage: "auto",
     chineseOutput: "simplified",

@@ -131,7 +131,7 @@ function validateSettings(value: unknown): TranscribeSettings | undefined {
   const microphone = validateMicrophone(value.microphone);
   // Existing pi-shout configs predate translation; never read settings from another extension.
   const translation = value.translation === undefined
-    ? defaultTranslationSettings()
+    ? defaultTranslationSettings(shortcut)
     : normalizeTranslationSettings(value.translation, shortcut);
   if (!preferredLanguages || !microphone || !translation || translation.shortcut === shortcut) return undefined;
 

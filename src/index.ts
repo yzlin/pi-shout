@@ -12,7 +12,11 @@ import { readShortcutsForRegistration } from "./startup-shortcut.js";
 export default function piVoice(pi: ExtensionAPI): void {
   // Opens nothing yet: the first line written creates the file.
   initLog({ path: logPath(), level: process.env.PI_VOICE_DEBUG === "1" ? "debug" : "info" });
-  const { original: registeredShortcut, translated: registeredTranslationShortcut } = readShortcutsForRegistration();
+  const {
+    original: registeredShortcut,
+    translated: registeredTranslationShortcut,
+    swap: registeredSwapShortcut,
+  } = readShortcutsForRegistration();
   let runtimePromise: Promise<PiVoiceRuntime> | undefined;
   let shuttingDown = false;
 
@@ -24,7 +28,7 @@ export default function piVoice(pi: ExtensionAPI): void {
     logStep("loading runtime");
     const loading = import("./runtime.js").then(({ createPiVoiceRuntime }) => {
       log.debug(`runtime loaded in ${Math.round(performance.now() - loadStarted)} ms`);
-      return createPiVoiceRuntime(pi, registeredShortcut, registeredTranslationShortcut);
+      return createPiVoiceRuntime(pi, registeredShortcut, registeredTranslationShortcut, registeredSwapShortcut);
     });
     runtimePromise = loading;
     void loading.catch(() => {
@@ -80,6 +84,14 @@ export default function piVoice(pi: ExtensionAPI): void {
   pi.registerShortcut(registeredTranslationShortcut as Parameters<ExtensionAPI['registerShortcut']>[0], {
     description: 'Toggle translated microphone dictation',
     handler: async (ctx) => (await loadRuntime()).toggleCapture(ctx, 'translated'),
+  });
+
+  pi.registerShortcut(registeredSwapShortcut as Parameters<ExtensionAPI['registerShortcut']>[0], {
+    description: 'Swap translated dictation draft',
+    handler: async (ctx) => {
+      const runtime = await runtimePromise?.catch(() => undefined);
+      runtime?.swap(ctx);
+    },
   });
 
   const openSettings = async (

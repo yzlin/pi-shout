@@ -16,7 +16,7 @@ process.env.PI_CODING_AGENT_DIR = directory;
 const path = join(directory, 'sample');
 await writeFile(path, 'public fake sample and model');
 const saved = settingsForModel('parakeet-unified-en-0.6b', path, {
-  translation: { shortcut: 'ctrl+alt+t', targetLanguage: 'en', prompt: 'Translate to {targetLanguage}' },
+  translation: { shortcut: 'ctrl+alt+t', swapShortcut: 'ctrl+alt+s', targetLanguage: 'en', prompt: 'Translate to {targetLanguage}' },
 });
 const save = () => writeFile(join(directory, 'pi-shout.json'), JSON.stringify(saved));
 await save();
@@ -32,18 +32,20 @@ const commands = new Map<string, { handler(args: string, ctx: ExtensionCommandCo
 let tool: ToolDefinition | undefined;
 const notices: string[] = [];
 const pastes: string[] = [];
+let editorText = '';
 let selection = 'Retry translation';
 const ctx = {
   cwd: directory, mode: 'rpc', hasUI: true, model, modelRegistry: remote.registry,
   sessionManager: { getSessionId: () => 'session', getLeafId: () => 'leaf' },
-  ui: { getEditorText: () => '', pasteToEditor: (text: string) => pastes.push(text),
+  ui: { getEditorText: () => editorText, pasteToEditor: (text: string) => { pastes.push(text); editorText += text; },
+    setEditorText: (text: string) => { editorText = text; },
     onTerminalInput: () => () => {}, setWidget() {}, theme: { fg: (_color: string, text: string) => text },
     notify: (text: string) => notices.push(text), select: async () => selection },
 } as unknown as ExtensionContext & ExtensionCommandContext;
 mock.module('../../src/runtime.js', { namedExports: {
-  createPiVoiceRuntime: (pi: ExtensionAPI, original: string, translated: string) => {
+  createPiVoiceRuntime: (pi: ExtensionAPI, original: string, translated: string, swap: string) => {
     runtimes++;
-    runtime = createPiVoiceRuntime(pi, original, translated, {
+    runtime = createPiVoiceRuntime(pi, original, translated, swap, {
       transcriptionService: new TranscriptionService(async () => ({ prepare: async () => {}, dispose: async () => {},
         transcribe: async () => { asrCalls++; return '你好'; } })),
       loadAudio: async () => ({ testMicrophonePermission: async () => ({ status: 'granted' as const }),
@@ -80,6 +82,8 @@ try {
     registerTool(value: ToolDefinition) { tool = value; },
   } as unknown as ExtensionAPI);
   assert.equal(runtimes, 0, 'registration stays lazy');
+  await shortcuts.get('ctrl+alt+s')!.handler(ctx);
+  assert.equal(runtimes, 0, 'inactive draft swapping stays lazy');
   assert.ok(tool);
   const file = await tool.execute('original', { path }, undefined, undefined, ctx);
   assert.equal(file.content[0]?.type === 'text' && file.content[0].text, '你好');

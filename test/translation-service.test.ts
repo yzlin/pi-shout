@@ -30,7 +30,7 @@ function setup() {
 test('swapped shortcuts accepted by settings reach provider without an implicit shortcut collision', async () => {
   const { service } = setup();
   const settings = settingsForModel('parakeet-unified-en-0.6b', '/tmp/model', {
-    shortcut: 'ctrl+alt+x', translation: { shortcut: 'ctrl+alt+z', prompt: 'Translate to {targetLanguage}', targetLanguage: 'en' },
+    shortcut: 'ctrl+alt+x', translation: { shortcut: 'ctrl+alt+z', swapShortcut: 'ctrl+alt+s', prompt: 'Translate to {targetLanguage}', targetLanguage: 'en' },
   });
   let called = false;
   const registry: TranslationRegistry = {
@@ -221,7 +221,7 @@ test('context exhaustion blocks stream and output budget respects all three limi
       find: () => selected, hasConfiguredAuth: () => true,
       streamSimple: (_model, _context, options) => { streamed = true; budget = options?.maxTokens; return { result: async () => response('translated') }; },
     };
-    const result = new TranslationService().translate({ text: 'x', targetLanguage: 'en', settings: { shortcut: 'ctrl+alt+t', prompt: '{targetLanguage}' }, context: { model: selected, modelRegistry: registry }, priority: 'file' });
+    const result = new TranslationService().translate({ text: 'x', targetLanguage: 'en', settings: { shortcut: 'ctrl+alt+t', swapShortcut: 'ctrl+alt+s', prompt: '{targetLanguage}' }, context: { model: selected, modelRegistry: registry }, priority: 'file' });
     if (expected === undefined) { await assert.rejects(result, { code: 'limit' }); assert.equal(streamed, false); }
     else { await result; assert.equal(budget, expected); }
   }
@@ -241,7 +241,7 @@ test('unsupported and unenforceable adapters fail before streaming', async () =>
       streamSimple: () => { streamed = true; return { result: async () => response('must not translate') }; },
     };
     await assert.rejects(
-      new TranslationService().translate({ text: 'x', targetLanguage: 'en', settings: { shortcut: 'ctrl+alt+t', prompt: '{targetLanguage}' }, context: { model: selected, modelRegistry: registry }, priority: 'file' }),
+      new TranslationService().translate({ text: 'x', targetLanguage: 'en', settings: { shortcut: 'ctrl+alt+t', swapShortcut: 'ctrl+alt+s', prompt: '{targetLanguage}' }, context: { model: selected, modelRegistry: registry }, priority: 'file' }),
       (error: unknown) => error instanceof TranslationError && (error.code === 'configuration' || error.code === 'limit') && /supported translation|output limit/u.test(error.message),
     );
     assert.equal(streamed, false);
@@ -249,7 +249,7 @@ test('unsupported and unenforceable adapters fail before streaming', async () =>
 });
 
 test('Responses preflight uses the conservative input bound at the 16-token floor without expanding caps', async () => {
-  const settings = { shortcut: 'ctrl+alt+t', prompt: '{targetLanguage}' };
+  const settings = { shortcut: 'ctrl+alt+t', swapShortcut: 'ctrl+alt+s', prompt: '{targetLanguage}' };
   const instructions = translationInstructions(settings.prompt, 'en');
   for (const api of ['openai-responses', 'azure-openai-responses'] as const) {
     for (const text of ['x', '你好世界']) {

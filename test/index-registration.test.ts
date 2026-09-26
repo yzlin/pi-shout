@@ -75,17 +75,17 @@ test("foreign settings do not suppress first-run setup notice", async (t) => {
   assert.match(notices[0]!, /Pi Shout installed/);
 });
 
-test('registers both recording modes, without registering /voice', () => {
+test('registers both recording modes and draft swapping, without registering /voice', () => {
   const shortcuts: string[] = [];
   const pi = {
     on() {}, registerTool() {}, registerCommand() {},
     registerShortcut(key: string) { shortcuts.push(key); },
   } as unknown as ExtensionAPI;
   piVoice(pi);
-  assert.deepEqual(shortcuts, ['ctrl+alt+z', 'ctrl+alt+t']);
+  assert.deepEqual(shortcuts, ['ctrl+alt+z', 'ctrl+alt+t', 'ctrl+alt+s']);
 });
 
-test('colliding persisted shortcuts fall back to two distinct defaults', async (t) => {
+test('colliding persisted shortcuts fall back to three distinct defaults', async (t) => {
   const previous = process.env.PI_CODING_AGENT_DIR;
   const directory = await mkdtemp(join(tmpdir(), 'pi-shout-shortcut-test-'));
   process.env.PI_CODING_AGENT_DIR = directory;
@@ -105,8 +105,8 @@ test('colliding persisted shortcuts fall back to two distinct defaults', async (
     registerShortcut(key: string) { shortcuts.push(key); },
   } as unknown as ExtensionAPI;
   piVoice(pi);
-  assert.deepEqual(shortcuts, ['ctrl+alt+z', 'ctrl+alt+t']);
-  assert.equal(new Set(shortcuts).size, 2);
+  assert.deepEqual(shortcuts, ['ctrl+alt+z', 'ctrl+alt+t', 'ctrl+alt+s']);
+  assert.equal(new Set(shortcuts).size, 3);
 });
 
 test('isolated extension uses one runtime/service, refreshes retry settings, and wires every invalidation hook', { timeout: 10000 }, async () => {
