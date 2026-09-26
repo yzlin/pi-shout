@@ -23,6 +23,7 @@ export class DictationDestination {
       return undefined;
     });
   }
+  wasEmpty(): boolean { return this.text.length === 0; }
   unchanged(): boolean {
     try {
       return !this.dirty && this.ctx.sessionManager.getSessionId() === this.session &&

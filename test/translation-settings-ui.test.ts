@@ -4,7 +4,7 @@ import { initTheme } from "@earendil-works/pi-coding-agent";
 import assert from "node:assert/strict";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { Component } from "@earendil-works/pi-tui";
-import { chooseTranslationTarget, chooseTranslationModel, editTranslationPrompt } from "../src/translation-settings-ui.js";
+import { chooseTranslationTarget, chooseTranslationModel, chooseTranslationShortcut, chooseTranslationSwapShortcut, editTranslationPrompt } from "../src/translation-settings-ui.js";
 import { defaultTranslationSettings, DEFAULT_TRANSLATION_PROMPT } from "../src/translation-settings.js";
 import { keybindings, testTheme, testTui } from "./ui-helpers.js";
 initTheme("dark");
@@ -57,6 +57,24 @@ test("model picker saves an available override and explicitly resets to current 
   assert.deepEqual(selected?.model, { provider: "mock", id: "translator" });
   const reset = context((pane) => { pane.handleInput?.("\x1b[A"); pane.handleInput?.("\r"); });
   assert.equal((await chooseTranslationModel(reset.ctx, selected!))?.model, undefined);
+});
+
+test("translation shortcut pickers reject defaults used by the paired binding", async () => {
+  const translationCollision = { ...defaultTranslationSettings(), swapShortcut: "ctrl+alt+t" };
+  const translated = context((pane) => {
+    pane.handleInput?.("d");
+    pane.handleInput?.("\r");
+    pane.handleInput?.("\x1b");
+  });
+  assert.equal(await chooseTranslationShortcut(translated.ctx, translationCollision, "ctrl+alt+z"), undefined);
+
+  const swapCollision = { ...defaultTranslationSettings(), shortcut: "ctrl+alt+s" };
+  const swap = context((pane) => {
+    pane.handleInput?.("d");
+    pane.handleInput?.("\r");
+    pane.handleInput?.("\x1b");
+  });
+  assert.equal(await chooseTranslationSwapShortcut(swap.ctx, swapCollision, "ctrl+alt+z"), undefined);
 });
 
 test("instructions edit, reset, cancel, and invalid placeholders do not save", async () => {

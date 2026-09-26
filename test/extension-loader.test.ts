@@ -49,7 +49,7 @@ test('Pi resource loader registers the source extension with isolated settings a
   assert.ok(IsString(schema.properties.path));
   assert.ok(IsString(schema.properties.targetLanguage));
   assert.deepEqual(schema.required, ['path']);
-  assert.deepEqual([...extension.shortcuts.keys()].sort(), ['ctrl+alt+t', 'ctrl+alt+z']);
+  assert.deepEqual([...extension.shortcuts.keys()].sort(), ['ctrl+alt+s', 'ctrl+alt+t', 'ctrl+alt+z']);
   for (const name of ['voice-settings', 'transcribe', 'voice-recover']) {
     assert.ok(extension.commands.has(name), `Missing command: ${name}`);
   }

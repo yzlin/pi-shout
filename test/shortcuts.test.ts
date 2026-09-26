@@ -11,13 +11,13 @@ test("translated reset uses its own default, never accepts original binding", ()
   const results: string[] = [];
   const pane = createShortcutPicker(testTui(), testTheme(), keybindings(), "ctrl+alt+y", (value) => {
     if (value) results.push(value);
-  }, { defaultShortcut: "ctrl+alt+t", forbiddenShortcut: "ctrl+alt+z" });
+  }, { defaultShortcut: "ctrl+alt+t", forbiddenShortcuts: ["ctrl+alt+z", "ctrl+alt+s"] });
   pane.handleInput?.("d"); // default key (see keybindings)
   pane.handleInput?.("\r");
   assert.deepEqual(results, ["ctrl+alt+t"]);
   const collision = createShortcutPicker(testTui(), testTheme(), keybindings(), "ctrl+alt+y", (value) => {
     if (value) results.push(value);
-  }, { defaultShortcut: "ctrl+alt+t", forbiddenShortcut: "ctrl+alt+t" });
+  }, { defaultShortcut: "ctrl+alt+t", forbiddenShortcuts: ["ctrl+alt+t", "ctrl+alt+s"] });
   collision.handleInput?.("d");
   collision.handleInput?.("\r");
   assert.deepEqual(results, ["ctrl+alt+t"]);
@@ -27,7 +27,7 @@ test("original default cannot collide with translated binding", () => {
   const results: string[] = [];
   const pane = createShortcutPicker(testTui(), testTheme(), keybindings(), "ctrl+alt+x", (value) => {
     if (value) results.push(value);
-  }, { forbiddenShortcut: "ctrl+alt+z" });
+  }, { forbiddenShortcuts: ["ctrl+alt+z", "ctrl+alt+s"] });
   pane.handleInput?.("d");
   pane.handleInput?.("\r");
   assert.deepEqual(results, []);

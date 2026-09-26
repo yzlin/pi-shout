@@ -3,7 +3,7 @@ import { SingleSelectPicker, type SingleSelectChoice } from "./ui-components.js"
 import { createShortcutPicker } from "./shortcuts.js";
 import { displayShortcut } from "./shortcut-core.js";
 import {
-  DEFAULT_TRANSLATION_PROMPT, DEFAULT_TRANSLATION_SHORTCUT,
+  DEFAULT_TRANSLATION_PROMPT, DEFAULT_TRANSLATION_SHORTCUT, DEFAULT_TRANSLATION_SWAP_SHORTCUT,
   TARGET_LANGUAGES, validateTranslationPrompt, type TranslationSettings,
 } from "./translation-settings.js";
 
@@ -85,9 +85,22 @@ export async function chooseTranslationShortcut(
   ctx: ExtensionContext, current: TranslationSettings, originalShortcut: string,
 ): Promise<TranslationSettings | undefined> {
   const shortcut = await ctx.ui.custom<string | undefined>((tui, theme, keys, done) =>
-    createShortcutPicker(tui, theme, keys, current.shortcut, done,
-      { defaultShortcut: DEFAULT_TRANSLATION_SHORTCUT, forbiddenShortcut: originalShortcut }));
+    createShortcutPicker(tui, theme, keys, current.shortcut, done, {
+      defaultShortcut: DEFAULT_TRANSLATION_SHORTCUT,
+      forbiddenShortcuts: [originalShortcut, current.swapShortcut],
+    }));
   return shortcut ? { ...current, shortcut } : undefined;
+}
+
+export async function chooseTranslationSwapShortcut(
+  ctx: ExtensionContext, current: TranslationSettings, originalShortcut: string,
+): Promise<TranslationSettings | undefined> {
+  const swapShortcut = await ctx.ui.custom<string | undefined>((tui, theme, keys, done) =>
+    createShortcutPicker(tui, theme, keys, current.swapShortcut, done, {
+      defaultShortcut: DEFAULT_TRANSLATION_SWAP_SHORTCUT,
+      forbiddenShortcuts: [originalShortcut, current.shortcut],
+    }));
+  return swapShortcut ? { ...current, swapShortcut } : undefined;
 }
 
 export function translationModelSummary(settings: TranslationSettings): string {

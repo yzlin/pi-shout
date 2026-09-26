@@ -12,6 +12,7 @@ import { logStep, watchEventLoop } from "./log.js";
 import type { Permission } from "./audio.js";
 import { DictationController, type OpenCapture } from "./dictation-controller.js";
 import { DictationDestination, safeEditorText } from "./dictation-output.js";
+import { clearDictationPreview, showDictationPreview } from './dictation-preview.js';
 import { VoiceKeys } from "./keybindings.js";
 import { requestReadyAfterReload, takeReadyRequest } from "./ready-handoff.js";
 import type { TranscribeSettings } from "./settings.js";
@@ -32,8 +33,16 @@ type ActiveRecording = {
   model: ExtensionContext['model'];
 };
 type Pending = { original: string; session: string; translated?: string };
-/** Shortcuts the Ready message describes; either one changing needs a reload to bind. */
-type ReadyKeys = { original: string; translated: string };
+/** Shortcuts the Ready message describes; any one changing needs a reload to bind. */
+type ReadyKeys = { original: string; translated: string; swap: string };
+type DraftVersion = 'original' | 'translated';
+type DraftPair = {
+  original: string;
+  translated: string;
+  active: DraftVersion;
+  session: string;
+  leaf: string | null;
+};
 
 const COMPLETION_WIDGET_MS = 5_000;
 /** Setup confirmation stays long enough to read the shortcut and follow-up command. */
@@ -45,6 +54,7 @@ export type PiVoiceRuntime = {
   requireConfiguredSettingsForTool(): Promise<TranscribeSettings>;
   toggleCapture(ctx: ExtensionContext, mode?: "original" | "translated"): Promise<void>;
   recover(ctx: ExtensionCommandContext): Promise<void>;
+  swap(ctx: ExtensionContext): void;
   invalidate(): void;
   showSettings(ctx: ExtensionCommandContext): Promise<void>;
   replayOnboarding(ctx: ExtensionCommandContext): Promise<void>;
@@ -79,7 +89,8 @@ type RuntimeDependencies = {
 export function createPiVoiceRuntime(
   pi: ExtensionAPI,
   registeredShortcut: string,
-  registeredTranslationShortcut = 'ctrl+alt+t',
+  registeredTranslationShortcut: string,
+  registeredSwapShortcut: string,
   dependencies: RuntimeDependencies = {},
 ): PiVoiceRuntime {
   let recording: ActiveRecording | undefined;
@@ -106,11 +117,95 @@ export function createPiVoiceRuntime(
   let pending: Pending | undefined;
   let translationAbort: AbortController | undefined;
   let generation = 0;
+  let draftPair: DraftPair | undefined;
+  let previewContext: ExtensionContext | undefined;
+  let stopDraftListening: (() => void) | undefined;
+  let draftObservation = 0;
+  let previewClearsWhenEmpty = false;
+
+  function clearDraftState(): void {
+    draftPair = undefined;
+    draftObservation++;
+    stopDraftListening?.();
+    stopDraftListening = undefined;
+    previewClearsWhenEmpty = false;
+    if (previewContext) clearDictationPreview(previewContext);
+    previewContext = undefined;
+  }
+
+  function observeDraftEditor(ctx: ExtensionContext, expectedPair: DraftPair | undefined): void {
+    if (draftPair !== expectedPair || (!expectedPair && !previewClearsWhenEmpty)) return;
+    try {
+      if (ctx.ui.getEditorText().length === 0) {
+        clearDraftState();
+        return;
+      }
+    } catch {
+      clearDraftState();
+      return;
+    }
+    const observation = ++draftObservation;
+    setImmediate(() => {
+      if (observation !== draftObservation || draftPair !== expectedPair ||
+        (!expectedPair && !previewClearsWhenEmpty)) return;
+      try {
+        if (ctx.ui.getEditorText().length === 0) clearDraftState();
+      } catch {
+        clearDraftState();
+      }
+    });
+  }
+
+  function showOriginalPreview(
+    ctx: ExtensionContext,
+    text: string,
+    hint: string,
+    clearWhenEditorEmpties = false,
+  ): void {
+    previewContext = ctx;
+    previewClearsWhenEmpty = clearWhenEditorEmpties;
+    if (clearWhenEditorEmpties && !stopDraftListening) {
+      stopDraftListening = ctx.ui.onTerminalInput(() => {
+        observeDraftEditor(ctx, undefined);
+        return undefined;
+      });
+    }
+    showDictationPreview(ctx, {
+      label: 'Original',
+      text,
+      hint,
+      observeEditor: clearWhenEditorEmpties ? () => observeDraftEditor(ctx, undefined) : undefined,
+    });
+  }
+
+  function showPairPreview(ctx: ExtensionContext): void {
+    const pair = draftPair;
+    if (!pair) return;
+    const inactive: DraftVersion = pair.active === 'original' ? 'translated' : 'original';
+    previewContext = ctx;
+    showDictationPreview(ctx, {
+      label: inactive === 'original' ? 'Original' : 'Translation',
+      text: pair[inactive],
+      hint: `${displayShortcut(registeredSwapShortcut)} to swap`,
+      observeEditor: () => observeDraftEditor(ctx, pair),
+    });
+  }
+
+  function activateDraftPair(ctx: ExtensionContext, pair: DraftPair): void {
+    clearDraftState();
+    draftPair = pair;
+    stopDraftListening = ctx.ui.onTerminalInput(() => {
+      observeDraftEditor(ctx, pair);
+      return undefined;
+    });
+    showPairPreview(ctx);
+  }
 
   function invalidate(): void {
     generation++;
     translationAbort?.abort();
     pending = undefined;
+    clearDraftState();
     cancelCompletionWidgetTimer();
     recording?.meter.stop({ clearWidget: false });
     recording?.unwatch();
@@ -148,21 +243,24 @@ export function createPiVoiceRuntime(
   }
 
   function readyKeys(configured: TranscribeSettings): ReadyKeys {
-    return { original: configured.shortcut, translated: configured.translation.shortcut };
+    return {
+      original: configured.shortcut,
+      translated: configured.translation.shortcut,
+      swap: configured.translation.swapShortcut,
+    };
   }
 
   function needsReload(keys: ReadyKeys): boolean {
-    return keys.original !== registeredShortcut || keys.translated !== registeredTranslationShortcut;
+    return keys.original !== registeredShortcut ||
+      keys.translated !== registeredTranslationShortcut ||
+      keys.swap !== registeredSwapShortcut;
   }
 
   async function notifyReady(ctx: ExtensionContext, keys: ReadyKeys): Promise<void> {
-    const shortcut = keys.original;
     // Pi binds shortcuts at extension load. The command path reloads on its
     // own; the shortcut path cannot, so say what it takes to use a new one.
-    const reloadNeeded = needsReload(keys);
-    const talk = reloadNeeded
-      ? `run /reload, then ${displayShortcut(shortcut)} to talk`
-      : `${displayShortcut(shortcut)} to talk`;
+    const shortcutSummary = `${displayShortcut(keys.original)} original · ${displayShortcut(keys.translated)} translated · ${displayShortcut(keys.swap)} swap`;
+    const talk = needsReload(keys) ? `run /reload, then ${shortcutSummary}` : shortcutSummary;
     const command = "/voice-settings";
     const commandDescription = "to change settings and download new models";
     const summary = `${command} ${commandDescription}`;
@@ -416,6 +514,7 @@ export function createPiVoiceRuntime(
         }
         pending = { original: result.text, session: ctx.sessionManager.getSessionId() };
         if (active.mode === 'translated') {
+          showOriginalPreview(ctx, result.text, 'Translating or waiting…');
           const abort = new AbortController();
           translationAbort = abort;
           showTranscribeStatus(ctx, 'Translating or waiting…', { cancelKeys });
@@ -432,12 +531,32 @@ export function createPiVoiceRuntime(
           } finally { if (translationAbort === abort) translationAbort = undefined; }
         }
         if (shuttingDown || generation !== currentGeneration) return;
-        const text = active.mode === 'original' ? pending.original : pending.translated;
+        const item = pending;
+        const text = active.mode === 'original' ? item.original : item.translated;
         if (text && safeEditorText(text) && destination?.unchanged()) {
-          ctx.ui.pasteToEditor(text);
-          pending = undefined;
-          showTranscribeStatus(ctx, formatTranscriptionSummary(result.speechSeconds, result.transcribeSeconds));
-          keepCompletionVisible = true;
+          try {
+            const emptyDestination = destination.wasEmpty();
+            ctx.ui.pasteToEditor(text);
+            const inserted = ctx.ui.getEditorText();
+            if (!safeEditorText(inserted) || inserted.length === 0) throw new Error('Editor rejected dictation');
+            pending = undefined;
+            if (active.mode === 'translated' && item.translated && emptyDestination &&
+              safeEditorText(item.original) && safeEditorText(item.translated)) {
+              activateDraftPair(ctx, {
+                original: item.original,
+                translated: inserted,
+                active: 'translated',
+                session: ctx.sessionManager.getSessionId(),
+                leaf: ctx.sessionManager.getLeafId(),
+              });
+            } else if (active.mode === 'translated') {
+              showOriginalPreview(ctx, item.original, 'Swap unavailable · editor was not empty', true);
+            }
+            showTranscribeStatus(ctx, formatTranscriptionSummary(result.speechSeconds, result.transcribeSeconds));
+            keepCompletionVisible = true;
+          } catch {
+            ctx.ui.notify('Editor unavailable; result retained for /voice-recover.', 'warning');
+          }
         } else if (pending) {
           ctx.ui.notify('Result held for recovery. Run /voice-recover to insert or discard.', 'warning');
           showTranscribeStatus(ctx, 'Recovery · /voice-recover');
@@ -454,7 +573,10 @@ export function createPiVoiceRuntime(
       clearKeyListener();
       if (shuttingDown || generation !== currentGeneration) return;
       if (keepCompletionVisible) holdCompletionWidget(ctx, clearTranscribeWidget);
-      else if (pending && !shuttingDown) showTranscribeStatus(ctx, 'Recovery · /voice-recover');
+      else if (pending && !shuttingDown) {
+        if (active.mode === 'translated') showOriginalPreview(ctx, pending.original, 'Recovery · /voice-recover');
+        showTranscribeStatus(ctx, 'Recovery · /voice-recover');
+      }
       else clearRuntimeStatusWidgetWith(ctx, clearTranscribeWidget);
     }
   }
@@ -543,6 +665,7 @@ export function createPiVoiceRuntime(
       ctx.ui.notify('Resolve the pending result with /voice-recover before recording.', 'warning');
       return;
     }
+    clearDraftState();
     const currentGeneration = generation;
     await captureCleanup;
     if (shuttingDown || generation !== currentGeneration) return;
@@ -601,6 +724,42 @@ export function createPiVoiceRuntime(
     await runExclusive(ctx, () => toggleCaptureTask(ctx, mode));
   }
 
+  function swap(ctx: ExtensionContext): void {
+    const pair = draftPair;
+    if (!pair || ctx.mode !== 'tui' || !ctx.hasUI) return;
+    if (pair.session !== ctx.sessionManager.getSessionId() || pair.leaf !== ctx.sessionManager.getLeafId()) {
+      clearDraftState();
+      return;
+    }
+    let activeText: string | undefined;
+    try {
+      activeText = ctx.ui.getEditorText();
+      if (activeText.length === 0) {
+        clearDraftState();
+        return;
+      }
+      const inactive: DraftVersion = pair.active === 'original' ? 'translated' : 'original';
+      const inactiveText = pair[inactive];
+      if (!safeEditorText(activeText) || !safeEditorText(inactiveText)) {
+        ctx.ui.notify('Unsafe draft cannot be inserted.', 'error');
+        return;
+      }
+      ctx.ui.setEditorText(inactiveText);
+      const inserted = ctx.ui.getEditorText();
+      if (!safeEditorText(inserted)) throw new Error('Editor rejected draft');
+      pair[pair.active] = activeText;
+      pair[inactive] = inserted;
+      pair.active = inactive;
+      draftObservation++;
+      showPairPreview(ctx);
+    } catch {
+      if (activeText !== undefined) {
+        try { ctx.ui.setEditorText(activeText); } catch { /* The editor remains unavailable; drafts stay in memory. */ }
+      }
+      ctx.ui.notify('Editor unavailable; drafts retained.', 'warning');
+    }
+  }
+
   async function recover(ctx: ExtensionCommandContext): Promise<void> {
     if (operation || recording) { ctx.ui.notify('Finish the current voice operation before recovery.', 'warning'); return; }
     const item = pending;
@@ -612,6 +771,7 @@ export function createPiVoiceRuntime(
       if (!choice || pending !== item || shuttingDown || item.session !== ctx.sessionManager.getSessionId()) return;
       if (choice === 'Discard') {
         pending = undefined;
+        clearDraftState();
         const { clearTranscribeWidget } = await loadVisualizer();
         clearRuntimeStatusWidgetWith(ctx, clearTranscribeWidget);
         return;
@@ -655,8 +815,25 @@ export function createPiVoiceRuntime(
       if (!text || !safeEditorText(text)) { ctx.ui.notify('Unsafe transcript cannot be inserted.', 'error'); return; }
       try {
         if (!ctx.hasUI || !ctx.sessionManager.getSessionId()) throw new Error('No active editor');
+        const emptyDestination = ctx.ui.getEditorText().length === 0;
         ctx.ui.pasteToEditor(text);
+        // RPC editor updates are fire-and-forget and cannot be read back
+        // synchronously. Only the TUI draft-pair path depends on verification.
+        const inserted = ctx.mode === 'tui' ? ctx.ui.getEditorText() : text;
+        if (!safeEditorText(inserted) || inserted.length === 0) throw new Error('Editor rejected dictation');
         pending = undefined;
+        if (ctx.mode === 'tui' && emptyDestination && item.translated && safeEditorText(item.original) && safeEditorText(item.translated)) {
+          const active: DraftVersion = choice === 'Insert original' ? 'original' : 'translated';
+          activateDraftPair(ctx, {
+            original: active === 'original' ? inserted : item.original,
+            translated: active === 'translated' ? inserted : item.translated,
+            active,
+            session: ctx.sessionManager.getSessionId(),
+            leaf: ctx.sessionManager.getLeafId(),
+          });
+        } else if (ctx.mode === 'tui' && item.translated) {
+          showOriginalPreview(ctx, item.original, 'Swap unavailable · editor was not empty', true);
+        } else clearDraftState();
       } catch { ctx.ui.notify('Editor unavailable; result retained.', 'warning'); }
       if (!pending) {
         const { clearTranscribeWidget } = await loadVisualizer();
@@ -689,7 +866,7 @@ export function createPiVoiceRuntime(
         return;
       }
       const { showSettingsMenu } = await import("./settings-menu.js");
-      reload = await showSettingsMenu(pi, ctx, configured, registeredShortcut, registeredTranslationShortcut);
+      reload = await showSettingsMenu(pi, ctx, configured, registeredShortcut, registeredTranslationShortcut, registeredSwapShortcut);
       settingsLoaded = false;
     });
     if (reload) await reloadForShortcut(ctx, readyShortcut);
@@ -701,6 +878,7 @@ export function createPiVoiceRuntime(
     readyShortcut: ReadyKeys | undefined,
   ): Promise<void> {
     if (readyShortcut) requestReadyAfterReload();
+    clearDraftState();
     await ctx.reload();
     // Unclaimed means Pi declined the reload (e.g. mid-response): show Ready with the /reload hint.
     if (takeReadyRequest() && readyShortcut && !shuttingDown) {
@@ -738,7 +916,11 @@ export function createPiVoiceRuntime(
   }
 
   async function showReadyAfterReload(ctx: ExtensionContext): Promise<void> {
-    await notifyReady(ctx, { original: registeredShortcut, translated: registeredTranslationShortcut });
+    await notifyReady(ctx, {
+      original: registeredShortcut,
+      translated: registeredTranslationShortcut,
+      swap: registeredSwapShortcut,
+    });
   }
 
   async function shutdown(ctx: ExtensionContext): Promise<void> {
@@ -768,6 +950,7 @@ export function createPiVoiceRuntime(
     requireConfiguredSettingsForTool,
     toggleCapture,
     recover,
+    swap,
     invalidate,
     showSettings,
     replayOnboarding,

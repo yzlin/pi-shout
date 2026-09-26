@@ -141,10 +141,10 @@ export async function runModelSelection(
 export async function chooseOnboardingShortcut(
   ctx: ExtensionContext,
   current: string,
-  forbiddenShortcut?: string,
+  forbiddenShortcuts: readonly string[] = [],
 ): Promise<string | undefined> {
   return ctx.ui.custom<string | undefined>((tui, theme, keybindings, done) =>
-    createShortcutPicker(tui, theme, keybindings, current, done, { forbiddenShortcut }),
+    createShortcutPicker(tui, theme, keybindings, current, done, { forbiddenShortcuts }),
   );
 }
 
@@ -155,7 +155,8 @@ export function onboardingShortcutUpdate(
   if (
     !shortcut ||
     shortcut === configured.shortcut ||
-    shortcut === configured.translation.shortcut
+    shortcut === configured.translation.shortcut ||
+    shortcut === configured.translation.swapShortcut
   ) return undefined;
   return { ...configured, shortcut };
 }
@@ -193,7 +194,7 @@ async function finishOnboarding(
       const shortcut = await chooseOnboardingShortcut(
         ctx,
         configured.shortcut,
-        configured.translation.shortcut,
+        [configured.translation.shortcut, configured.translation.swapShortcut],
       );
       const updated = onboardingShortcutUpdate(configured, shortcut);
       if (updated && await saveOnboardingSettings(ctx, updated)) configured = updated;

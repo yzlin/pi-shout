@@ -28,6 +28,7 @@ function settings(): TranscribeSettings {
     preferredLanguages: ["en"],
     translation: {
       shortcut: "ctrl+alt+t",
+      swapShortcut: "ctrl+alt+s",
       prompt: DEFAULT_TRANSLATION_PROMPT,
     },
   });
@@ -76,11 +77,12 @@ test("settings workflow persists target, model, custom prompt, and translated sh
     "translation-model", JSON.stringify(["mock", "translator"]),
     "translation-prompt", "edit",
     "translation-shortcut", "ctrl+alt+r",
+    "translation-swap-shortcut", "ctrl+alt+w",
     undefined,
   ], ["Translate into {targetLanguage}. Keep identifiers unchanged."]);
 
   assert.equal(await showSettingsMenu(
-    pi, script.ctx, configured, "ctrl+alt+z", "ctrl+alt+t", permissionProbe,
+    pi, script.ctx, configured, "ctrl+alt+z", "ctrl+alt+t", "ctrl+alt+s", permissionProbe,
   ), true);
   script.assertFinished();
 
@@ -89,6 +91,7 @@ test("settings workflow persists target, model, custom prompt, and translated sh
   assert.deepEqual(reloaded?.translation.model, { provider: "mock", id: "translator" });
   assert.equal(reloaded?.translation.prompt, "Translate into {targetLanguage}. Keep identifiers unchanged.");
   assert.equal(reloaded?.translation.shortcut, "ctrl+alt+r");
+  assert.equal(reloaded?.translation.swapShortcut, "ctrl+alt+w");
 });
 
 test("settings workflow persists prompt reset", async (t) => {
@@ -100,7 +103,7 @@ test("settings workflow persists prompt reset", async (t) => {
     "translation-prompt", "reset", undefined,
   ]);
 
-  await showSettingsMenu(pi, script.ctx, configured, configured.shortcut, configured.translation.shortcut, permissionProbe);
+  await showSettingsMenu(pi, script.ctx, configured, configured.shortcut, configured.translation.shortcut, configured.translation.swapShortcut, permissionProbe);
   script.assertFinished();
   assert.equal((await readSettings()).settings?.translation.prompt, DEFAULT_TRANSLATION_PROMPT);
 });
@@ -116,16 +119,16 @@ test("cancelled and invalid translation edits leave saved settings unchanged", a
   ], ["Translate {text}"]);
 
   assert.equal(await showSettingsMenu(
-    pi, script.ctx, configured, configured.shortcut, configured.translation.shortcut, permissionProbe,
+    pi, script.ctx, configured, configured.shortcut, configured.translation.shortcut, configured.translation.swapShortcut, permissionProbe,
   ), false);
   script.assertFinished();
   assert.deepEqual((await readSettings()).settings, settings());
   assert.match(script.notices.join("\n"), /must contain \{targetLanguage\}/u);
 });
 
-test("reload remains required until both shortcut registrations match", () => {
+test("reload remains required until all shortcut registrations match", () => {
   const configured = settings();
-  assert.equal(shortcutSettingsNeedReload(configured, "ctrl+alt+z", "ctrl+alt+t"), false);
+  assert.equal(shortcutSettingsNeedReload(configured, "ctrl+alt+z", "ctrl+alt+t", "ctrl+alt+s"), false);
 
   configured.shortcut = "ctrl+alt+x";
   assert.equal(shortcutSettingsNeedReload(configured, "ctrl+alt+z", "ctrl+alt+t"), true);
@@ -137,5 +140,8 @@ test("reload remains required until both shortcut registrations match", () => {
   assert.equal(shortcutSettingsNeedReload(configured, "ctrl+alt+z", "ctrl+alt+t"), true);
 
   configured.translation.shortcut = "ctrl+alt+t";
-  assert.equal(shortcutSettingsNeedReload(configured, "ctrl+alt+z", "ctrl+alt+t"), false);
+  assert.equal(shortcutSettingsNeedReload(configured, "ctrl+alt+z", "ctrl+alt+t", "ctrl+alt+s"), false);
+
+  configured.translation.swapShortcut = "ctrl+alt+w";
+  assert.equal(shortcutSettingsNeedReload(configured, "ctrl+alt+z", "ctrl+alt+t", "ctrl+alt+s"), true);
 });
